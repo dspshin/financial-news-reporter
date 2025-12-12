@@ -1,0 +1,6 @@
+yfinance
+feedparser
+google-generativeai
+requests
+python-dotenv
+beautifulsoup4
