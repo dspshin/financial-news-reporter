@@ -379,6 +379,7 @@ def send_telegram_message(message):
         
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     
+    # Try sending with HTML first
     payload = {
         "chat_id": channel_id,
         "text": message,
@@ -390,6 +391,22 @@ def send_telegram_message(message):
         response.raise_for_status()
         print("Message sent successfully to Telegram.")
         return True
+    except requests.exceptions.HTTPError as e:
+        if response.status_code == 400:
+            print(f"   [Warning] HTML parse failed (400 Bad Request). Retrying with plain text fallback...")
+            # Remove parse_mode to send as plain text
+            payload.pop("parse_mode")
+            try:
+                response = requests.post(url, json=payload)
+                response.raise_for_status()
+                print("Message sent successfully to Telegram (Plain Text Fallback).")
+                return True
+            except Exception as e2:
+                print(f"   Error sending fallback message: {e2}")
+                return False
+        else:
+            print(f"Error sending message: {e}")
+            return False
     except requests.exceptions.RequestException as e:
         print(f"Error sending message: {e}")
         return False
@@ -413,6 +430,7 @@ def main():
     # Usage: python main.py --mode saturday
     # Usage: python main.py --date 2023-12-25
     
+    args = []
     if len(sys.argv) > 1:
         args = sys.argv[1:]
         if "--mode" in args:
