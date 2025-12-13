@@ -8,12 +8,38 @@ from datetime import datetime
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import time
+import logging
 
 # --- Configuration ---
 # User-Agent to avoid being blocked by some news sites
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
+
+
+# --- Logging Configuration ---
+def setup_logging():
+    # Create a custom logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers if any
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # File Handler - Writes to latest_run.log, overwriting each time
+    file_handler = logging.FileHandler('latest_run.log', mode='w', encoding='utf-8')
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+    
+    # Console Handler - Writes to stdout
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s') # Keep console clean
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
 
 # --- Data Fetcher Module ---
 def fetch_market_data():
@@ -33,7 +59,8 @@ def fetch_market_data():
     }
     
     data = {}
-    print("   Fetching market data...")
+    data = {}
+    logging.info("   Fetching market data...")
     
     for name, symbol in tickers.items():
         try:
@@ -55,7 +82,7 @@ def fetch_market_data():
             else:
                 data[name] = None
         except Exception as e:
-            print(f"   Error fetching {name}: {e}")
+            logging.error(f"   Error fetching {name}: {e}")
             data[name] = None
             
     return data
@@ -89,7 +116,7 @@ def scrape_article_content(url):
         return text[:800]
         
     except Exception as e:
-        print(f"   Failed to scrape {url}: {e}")
+        logging.error(f"   Failed to scrape {url}: {e}")
         return None
 
 def fetch_news(mode="weekday"):
@@ -99,14 +126,14 @@ def fetch_news(mode="weekday"):
     """
     
     if mode == "saturday":
-        print("   [Mode] Saturday: Focusing on US Market Close & Global News")
+        logging.info("   [Mode] Saturday: Focusing on US Market Close & Global News")
         queries = [
             "미국 증시 마감",     # US Market Close
             "주간 해외 증시",     # Weekly Overseas Market
             "글로벌 경제뉴스"     # Global Economic News
         ]
     elif mode == "sunday":
-        print("   [Mode] Sunday: Focusing on Weekly Summary & Next Week Outlook")
+        logging.info("   [Mode] Sunday: Focusing on Weekly Summary & Next Week Outlook")
         queries = [
             "주간 증시 정리",     # Weekly Market Summary
             "다음주 증시 일정",   # Next Week Market Schedule
@@ -114,7 +141,7 @@ def fetch_news(mode="weekday"):
             "주간 증시 전망"      # Weekly Market Outlook
         ]
     else: # weekday
-        print("   [Mode] Weekday: Focusing on Daily Market Outlook")
+        logging.info("   [Mode] Weekday: Focusing on Daily Market Outlook")
         queries = [
             "미국 증시 마감",     # US Market Close
             "특징주",            # Hot Stocks
@@ -124,7 +151,7 @@ def fetch_news(mode="weekday"):
     combined_news_context = ""
     seen_links = set()
     
-    print("   Fetching news and scraping content...")
+    logging.info("   Fetching news and scraping content...")
     
     for query in queries:
         rss_url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR%3Ako"
@@ -138,7 +165,7 @@ def fetch_news(mode="weekday"):
                     continue
                 seen_links.add(entry.link)
                 
-                print(f"   - Processing: {entry.title}")
+                logging.info(f"   - Processing: {entry.title}")
                 content = scrape_article_content(entry.link)
                 
                 if content:
@@ -153,7 +180,7 @@ def fetch_news(mode="weekday"):
                     combined_news_context += f"\nTitle: {entry.title}\nLink: {entry.link}\n(Content scraping failed)\n"
                     
         except Exception as e:
-            print(f"   Error fetching RSS for {query}: {e}")
+            logging.error(f"   Error fetching RSS for {query}: {e}")
             
     return combined_news_context
 
@@ -340,10 +367,10 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     # Retry logic with Model Fallback
     models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-flash-latest']
     
-    print(f"   [Debug] Generating briefing for mode: {mode}")
+    logging.info(f"   [Debug] Generating briefing for mode: {mode}")
     
     for model_name in models_to_try:
-        print(f"   Using model: {model_name}...")
+        logging.info(f"   Using model: {model_name}...")
         max_retries = 3
         retry_delay = 30
         
@@ -354,14 +381,14 @@ def generate_briefing(market_data, news_context, mode="weekday"):
                 return response.text
             except Exception as e:
                 if "429" in str(e):
-                    print(f"   [Rate Limit Hit] Waiting {retry_delay} seconds before retry ({attempt + 1}/{max_retries})...")
+                    logging.warning(f"   [Rate Limit Hit] Waiting {retry_delay} seconds before retry ({attempt + 1}/{max_retries})...")
                     time.sleep(retry_delay)
                     retry_delay += 30 
                 else:
-                    print(f"   Error with {model_name}: {e}")
+                    logging.error(f"   Error with {model_name}: {e}")
                     break 
         
-        print(f"   Failed with {model_name}, attempting fallback...")
+        logging.warning(f"   Failed with {model_name}, attempting fallback...")
     
     return "Error: Failed to generate briefing with all available models."
 
@@ -374,7 +401,7 @@ def send_telegram_message(message):
     channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
     
     if not bot_token or not channel_id:
-        print("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID not found.")
+        logging.error("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID not found.")
         return False
         
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -389,30 +416,34 @@ def send_telegram_message(message):
     try:
         response = requests.post(url, json=payload)
         response.raise_for_status()
-        print("Message sent successfully to Telegram.")
+        logging.info("Message sent successfully to Telegram.")
         return True
     except requests.exceptions.HTTPError as e:
         if response.status_code == 400:
-            print(f"   [Warning] HTML parse failed (400 Bad Request). Retrying with plain text fallback...")
+            logging.warning(f"   [Warning] HTML parse failed (400 Bad Request). Retrying with plain text fallback...")
             # Remove parse_mode to send as plain text
             payload.pop("parse_mode")
             try:
                 response = requests.post(url, json=payload)
                 response.raise_for_status()
-                print("Message sent successfully to Telegram (Plain Text Fallback).")
+                logging.info("Message sent successfully to Telegram (Plain Text Fallback).")
                 return True
             except Exception as e2:
-                print(f"   Error sending fallback message: {e2}")
+                logging.error(f"   Error sending fallback message: {e2}")
                 return False
         else:
-            print(f"Error sending message: {e}")
+            logging.error(f"Error sending message: {e}")
             return False
     except requests.exceptions.RequestException as e:
-        print(f"Error sending message: {e}")
+        logging.error(f"Error sending message: {e}")
         return False
 
 # --- Main Execution ---
 def main():
+    # Setup Logging
+    # Note: We must call this before any logging calls
+    setup_logging()
+
     # Load environment variables
     load_dotenv()
     
@@ -438,37 +469,38 @@ def main():
                 idx = args.index("--mode")
                 mode = args[idx+1]
             except IndexError:
-                print("Error: --mode requires an argument (weekday/saturday/sunday)")
+                logging.error("Error: --mode requires an argument (weekday/saturday/sunday)")
         
-    print(f"--- Daily Economic Briefing Service (Mode: {mode.upper()}) ---")
+    logging.info(f"--- Daily Economic Briefing Service (Mode: {mode.upper()}) ---")
     
     # 1. Fetch Data
-    print("1. Fetching Market Data...")
+    logging.info("1. Fetching Market Data...")
     market_data = fetch_market_data()
     
     # 2. Fetch & Scrape News (Pass Mode)
-    print("2. Fetching & Scraping News...")
+    logging.info("2. Fetching & Scraping News...")
     news_context = fetch_news(mode=mode)
     
     # 3. Generate Briefing (Pass Mode)
-    print("3. Generating Briefing using Gemini...")
+    logging.info("3. Generating Briefing using Gemini...")
     briefing = generate_briefing(market_data, news_context, mode=mode)
     
     # 4. Print to Console
-    print("\n" + "="*50)
-    print(briefing)
-    print("="*50 + "\n")
+    logging.info("\n" + "="*50)
+    # We want this in the log file too, so usage of info is correct
+    logging.info(briefing) 
+    logging.info("="*50 + "\n")
     
     # 5. Send to Telegram
     # Skip if 'test' in args
     if "test" in args:
-         print("4. Sending to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("4. Sending to Telegram... [SKIPPED] (Test Mode)")
     else:
-        print("4. Sending to Telegram...")
+        logging.info("4. Sending to Telegram...")
         if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHANNEL_ID"):
             send_telegram_message(briefing)
         else:
-            print("Skipping Telegram send (Credentials not found in .env)")
+            logging.info("Skipping Telegram send (Credentials not found in .env)")
 
 if __name__ == "__main__":
     main()
