@@ -27,8 +27,9 @@ def setup_logging():
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    # File Handler - Writes to latest_run.log, overwriting each time
-    file_handler = logging.FileHandler('latest_run.log', mode='w', encoding='utf-8')
+    # File Handler - Writes to configured log file (default: latest_run.log), overwriting each time
+    log_file_path = os.getenv("LOG_FILE_PATH", "latest_run.log")
+    file_handler = logging.FileHandler(log_file_path, mode='w', encoding='utf-8')
     file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     file_handler.setFormatter(file_formatter)
@@ -365,7 +366,7 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     """
     
     # Retry logic with Model Fallback
-    models_to_try = ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-flash-latest']
+    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
     
     logging.info(f"   [Debug] Generating briefing for mode: {mode}")
     
@@ -440,12 +441,12 @@ def send_telegram_message(message):
 
 # --- Main Execution ---
 def main():
+    # Load environment variables
+    load_dotenv()
+
     # Setup Logging
     # Note: We must call this before any logging calls
     setup_logging()
-
-    # Load environment variables
-    load_dotenv()
     
     # Determine Mode
     # Default is based on today's weekday
