@@ -320,7 +320,7 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     <b>🚀 오늘의 최강 테마 (우선순위)</b>
     
     <b>🥇 1순위: (Sector Name)</b>
-    <b>"(Catchy Slogan)"</b>
+    <b>(Catchy Slogan)</b>
     <b>관련주:</b>
     - (List stocks)
     <b>호재:</b>
@@ -361,7 +361,12 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     
     **Instructions:**
     - **Language**: Korean.
-    - **Formatting**: Use HTML tags (`<b>`, etc.). NO Markdown (`*`, `#`).
+    - **Formatting**:
+        - Use ONLY these Telegram-supported HTML tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="...">.
+        - **FORBIDDEN TAGS**: <p>, <ul>, <ol>, <li>, <div>, <span>, <font>, <br>, <h1>..<h6>. DO NOT USE THESE.
+        - **Lists**: Use hyphens (-) or emojis for lists. Do NOT use <ul>/<li>.
+        - **Newlines**: Use actual newlines instead of <br> or <p>.
+        - **Colors**: Do NOT use <font color="...">. Use emojis like 🔴 (Red/Up/Hot) or 🔵 (Blue/Cool/Down) or 🔻/🔺 to represent direction/sentiment.
     - **Specifics**: Use ACTUAL numbers from the articles.
     """
     
