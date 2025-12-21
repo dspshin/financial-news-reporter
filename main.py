@@ -4,11 +4,44 @@ import requests
 import yfinance as yf
 import feedparser
 import google.generativeai as genai
-from datetime import datetime
+import holidays
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import time
 import logging
+
+# --- Holiday Check Module ---
+def check_holidays(today=None):
+    """
+    Checks if today is a KR market holiday or if the previous weekday was a US market holiday.
+    Returns: (is_kr_holiday, is_us_holiday_prev_close, holiday_name_kr, holiday_name_us)
+    """
+    if today is None:
+        today = datetime.now().date()
+    
+    # 1. Check KR Market Holiday (Today)
+    kr_holidays = holidays.KR()
+    is_kr_holiday = today in kr_holidays
+    holiday_name_kr = kr_holidays.get(today) if is_kr_holiday else None
+    
+    # 2. Check US Market Holiday (Previous Weekday)
+    # Market close data usually comes from the previous trading day.
+    # We need to check if the day we expect data from (yesterday, or Friday if today is Monday) was a holiday.
+    us_holidays = holidays.US(state='NY') # APPROXIMATION for NYSE holidays
+    
+    # Find previous weekday
+    offset = 1
+    while True:
+        prev_date = today - timedelta(days=offset)
+        if prev_date.weekday() < 5: # Mon-Fri
+            break
+        offset += 1
+        
+    is_us_holiday_prev_close = prev_date in us_holidays
+    holiday_name_us = us_holidays.get(prev_date) if is_us_holiday_prev_close else None
+            
+    return is_kr_holiday, is_us_holiday_prev_close, holiday_name_kr, holiday_name_us
 
 # --- Configuration ---
 # User-Agent to avoid being blocked by some news sites
@@ -120,10 +153,10 @@ def scrape_article_content(url):
         logging.error(f"   Failed to scrape {url}: {e}")
         return None
 
-def fetch_news(mode="weekday"):
+def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False):
     """
     Fetches top economic news using Google News RSS with specific search queries
-    based on the mode (weekday/saturday/sunday).
+    based on the mode (weekday/saturday/sunday) and holiday status.
     """
     
     if mode == "saturday":
@@ -142,12 +175,35 @@ def fetch_news(mode="weekday"):
             "주간 증시 전망"      # Weekly Market Outlook
         ]
     else: # weekday
-        logging.info("   [Mode] Weekday: Focusing on Daily Market Outlook")
-        queries = [
-            "미국 증시 마감",     # US Market Close
-            "특징주",            # Hot Stocks
-            "국내 증시 전망"      # Korea Market Outlook
-        ]
+        if is_kr_holiday:
+            if is_us_holiday:
+                logging.info("   [Mode] Weekday (KR & US Holiday): Focusing on Global Economy")
+                queries = [
+                    "글로벌 경제뉴스",     # Global Economic News
+                    "해외 증시 요약",      # Overseas Market Summary
+                    "미국 경제 뉴스"       # US Economic News
+                ]
+            else:
+                logging.info("   [Mode] Weekday (KR Holiday): Focusing on US Market & Global News")
+                queries = [
+                    "미국 증시 마감",     # US Market Close
+                    "글로벌 경제뉴스",     # Global Economic News
+                    "주요 해외 뉴스"      # Major Overseas News
+                ]
+        elif is_us_holiday:
+            logging.info("   [Mode] Weekday (US Holiday): Focusing on General US Economy")
+            queries = [
+                "미국 경제 뉴스",     # US Economic News (Generic)
+                "특징주",            # Hot Stocks
+                "국내 증시 전망"      # Korea Market Outlook
+            ]
+        else:
+            logging.info("   [Mode] Weekday: Focusing on Daily Market Outlook")
+            queries = [
+                "미국 증시 마감",     # US Market Close
+                "특징주",            # Hot Stocks
+                "국내 증시 전망"      # Korea Market Outlook
+            ]
     
     combined_news_context = ""
     seen_links = set()
@@ -186,7 +242,7 @@ def fetch_news(mode="weekday"):
     return combined_news_context
 
 # --- Summarizer Module ---
-def generate_briefing(market_data, news_context, mode="weekday"):
+def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None):
     """
     Generates a daily economic briefing using Gemini 2.0 Flash with a structured analyst persona.
     """
@@ -210,6 +266,10 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     else:
         market_summary += "Data Unavailable\n"
         
+    # Helper to clean up holiday text
+    us_holiday_text = f" (미국 휴장: {holiday_name_us})" if is_us_holiday else ""
+    kr_holiday_text = f" (국내 휴장: {holiday_name_kr})" if is_kr_holiday else ""
+
     # Define Prompt Template based on Mode
     if mode == "saturday":
         # Saturday: Global Market Weekly Summary
@@ -284,9 +344,19 @@ def generate_briefing(market_data, news_context, mode="weekday"):
         
     else:
         # Weekday: Daily Outlook (Original)
-        prompt_content = f"""
-    <b>📊 {today} 한국 증시 종합 전망 보고서</b>
-    
+        
+        # Determine Header
+        header = f"<b>📊 {today} 한국 증시 종합 전망 보고서{kr_holiday_text}</b>"
+        
+        # US Market Section
+        if is_us_holiday:
+            us_section = f"""
+    <b>🌍 글로벌 시장 상황 (미국 휴장: {holiday_name_us})</b>
+    - <b>미국 증시는 '{holiday_name_us}'로 인해 휴장했습니다.</b>
+    - (Instead, summarize any major European or Global economic news if available, or skip with a brief mention.)
+            """
+        else:
+            us_section = """
     <b>🌍 글로벌 시장 상황 (미 증시)</b>
     <b>지수</b>
     - (List major US indices: Dow, Nasdaq, S&P500, Russell 2000, Philly Semi with % change)
@@ -294,29 +364,28 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     
     <b>핵심 특징</b>
     - (Summarize 2-3 key drivers. Use bolding for keywords.)
-    
-    ---
-    
-    <b>🔥 미 증시 핵심 모멘텀 (국내 영향)</b>
-    (Identify 3-4 key themes/events)
-    
-    <b>1️⃣ (Theme Title)</b>
-    - <b>(Key Point)</b>: (Detail)
-    - <b>(Key Point)</b>: (Detail)
-    <b>결과:</b>
-    - (List related US stocks with specific % rise/fall)
-    
-    <b>2️⃣ (Theme Title)</b>
-    ...
-    
-    ---
-    
+            """
+            
+        # KR Market Section (Outlook)
+        if is_kr_holiday:
+            kr_section = f"""
+    <b>🇰🇷 한국 증시 상황 (휴장: {holiday_name_kr})</b>
+    - <b>오늘은 '{holiday_name_kr}'로 인해 한국 증시가 휴장합니다.</b>
+    - (Do NOT provide a specific forecast range or hot themes for trading today.)
+    - (Instead, briefly summarize the overall sentiment or recent trend leading into the holiday.)
+            """
+            # Outlook sections (Themes, Strategy) should be minimized or removed for holidays
+            extra_section = """
+    <b>💡 휴장일 체크 포인트</b>
+    - (Any major global events to watch during the holiday)
+            """
+        else:
+            kr_section = """
     <b>🇰🇷 한국 증시 오늘 전망</b>
     <b>예상 범위</b>
     <b>코스피: (Estimate a range)</b>
-    
-    ---
-    
+            """
+            extra_section = """
     <b>🚀 오늘의 최강 테마 (우선순위)</b>
     
     <b>🥇 1순위: (Sector Name)</b>
@@ -340,8 +409,22 @@ def generate_briefing(market_data, news_context, mode="weekday"):
     
     <b>🔴 주의/매도</b>
     - (Sectors)
+            """
+
+        prompt_content = f"""
+    {header}
+    
+    {us_section}
     
     ---
+    
+    {extra_section if not is_kr_holiday else ""}
+    
+    {kr_section}
+    
+    ---
+    
+    {extra_section if is_kr_holiday else ""}
     
     <b>🎬 결론</b>
     (One sentence summary)
@@ -453,9 +536,27 @@ def main():
     # Note: We must call this before any logging calls
     setup_logging()
     
+    # Check for CLI arguments
+    # Usage: python main.py --mode saturday
+    # Usage: python main.py --date 2023-12-25
+    args = sys.argv[1:] if len(sys.argv) > 1 else []
+    
+    # Determine 'today' for holiday checking
+    today = datetime.now().date()
+    if "--date" in args:
+        try:
+            idx = args.index("--date")
+            date_str = args[idx+1]
+            today = datetime.strptime(date_str, "%Y-%m-%d").date()
+            logging.info(f"   [Debug] Using custom date: {today}")
+        except (IndexError, ValueError) as e:
+             logging.error(f"Error: --date requires YYYY-MM-DD format. Using today. {e}")
+    
+    # Check Holidays
+    is_kr_holiday, is_us_holiday_prev_close, holiday_name_kr, holiday_name_us = check_holidays(today)
+    
     # Determine Mode
-    # Default is based on today's weekday
-    today_weekday = datetime.now().weekday() # Mon=0, Sun=6
+    today_weekday = today.weekday() # Mon=0, Sun=6
     
     mode = "weekday"
     if today_weekday == 5:
@@ -463,33 +564,40 @@ def main():
     elif today_weekday == 6:
         mode = "sunday"
         
-    # Check for CLI arguments override
-    # Usage: python main.py --mode saturday
-    # Usage: python main.py --date 2023-12-25
-    
-    args = []
-    if len(sys.argv) > 1:
-        args = sys.argv[1:]
-        if "--mode" in args:
-            try:
-                idx = args.index("--mode")
-                mode = args[idx+1]
-            except IndexError:
-                logging.error("Error: --mode requires an argument (weekday/saturday/sunday)")
+    # Mode override
+    if "--mode" in args:
+        try:
+            idx = args.index("--mode")
+            mode = args[idx+1]
+        except IndexError:
+            logging.error("Error: --mode requires an argument (weekday/saturday/sunday)")
         
     logging.info(f"--- Daily Economic Briefing Service (Mode: {mode.upper()}) ---")
+    if is_kr_holiday:
+        logging.info(f"   [Holiday] KR Market Closed: {holiday_name_kr}")
+    if is_us_holiday_prev_close and mode == "weekday":
+        logging.info(f"   [Holiday] US Market (Prev Close) Closed: {holiday_name_us}")
     
     # 1. Fetch Data
     logging.info("1. Fetching Market Data...")
     market_data = fetch_market_data()
     
-    # 2. Fetch & Scrape News (Pass Mode)
+    # 2. Fetch & Scrape News (Pass Mode & Holiday Status)
     logging.info("2. Fetching & Scraping News...")
-    news_context = fetch_news(mode=mode)
+    # Pass US holiday status for news fetching logic
+    news_context = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday)
     
-    # 3. Generate Briefing (Pass Mode)
+    # 3. Generate Briefing (Pass Mode & Holiday Context)
     logging.info("3. Generating Briefing using Gemini...")
-    briefing = generate_briefing(market_data, news_context, mode=mode)
+    briefing = generate_briefing(
+        market_data, 
+        news_context, 
+        mode=mode,
+        is_us_holiday=is_us_holiday_prev_close,
+        is_kr_holiday=is_kr_holiday,
+        holiday_name_kr=holiday_name_kr,
+        holiday_name_us=holiday_name_us
+    )
     
     # 4. Print to Console
     logging.info("\n" + "="*50)
@@ -499,7 +607,7 @@ def main():
     
     # 5. Send to Telegram
     # Skip if 'test' in args
-    if "test" in args:
+    if "test" in args or "--test" in args:
          logging.info("4. Sending to Telegram... [SKIPPED] (Test Mode)")
     else:
         logging.info("4. Sending to Telegram...")
