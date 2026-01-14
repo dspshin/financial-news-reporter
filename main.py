@@ -216,8 +216,8 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False):
             response = requests.get(rss_url, timeout=10)
             feed = feedparser.parse(response.content)
             
-            # Take top 1 article per query to keep it focused and avoid token limits
-            for entry in feed.entries[:1]:
+            # Take top 3 articles per query to get even more diverse news
+            for entry in feed.entries[:3]:
                 if entry.link in seen_links:
                     continue
                 seen_links.add(entry.link)
