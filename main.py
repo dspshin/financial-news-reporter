@@ -153,7 +153,7 @@ def scrape_article_content(url):
         logging.error(f"   Failed to scrape {url}: {e}")
         return None
 
-def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False):
+def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target="general"):
     """
     Fetches top economic news using Google News RSS with specific search queries
     based on the mode (weekday/saturday/sunday) and holiday status.
@@ -204,6 +204,14 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False):
                 "특징주",            # Hot Stocks
                 "국내 증시 전망"      # Korea Market Outlook
             ]
+            
+    if target == "pef":
+        logging.info("   [Target] PEF: Adding M&A and Private Equity queries")
+        queries.extend([
+            "사모펀드",
+            "M&A 인수합병",
+            "PEF 투자"
+        ])
     
     combined_news_context = ""
     seen_links = set()
@@ -242,7 +250,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False):
     return combined_news_context
 
 # --- Summarizer Module ---
-def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None):
+def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general"):
     """
     Generates a daily economic briefing using Gemini 2.0 Flash with a structured analyst persona.
     """
@@ -430,9 +438,39 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     (One sentence summary)
         """
 
+    if target == "pef":
+        today_title = f"<b>👔 {today} PEF GP 인사이트 브리핑{kr_holiday_text}</b>"
+        prompt_content = f"""
+    {today_title}
+    
+    <b>📊 매크로 및 딜 환경 점검</b>
+    - (주요 경제 지표 및 증시 상황이 출자자(LP) 및 딜 소싱에 미칠 핵심 영향 한 줄 평)
+    
+    <b>🗞️ 주요 M&A 및 매크로 뉴스</b>
+    - (일반 경제 및 사모펀드/M&A 관련 가장 핵심적인 뉴스 3-4개 압축 요약)
+    
+    ---
+    
+    <b>💡 PEF GP의 딥다이브 인사이트</b>
+    <b>1. 딜 소싱 및 섹터 동향 (Deal Sourcing)</b>
+    - (현재 매크로 뉴스를 기반으로 주목해야 할 매물, 유망 섹터, 투자 리스크 분석)
+    
+    <b>2. 밸류에이션 및 엑시트 환경 (Valuation & Exit)</b>
+    - (시장 금리와 유동성이 포트폴리오 기업 가치 및 매각/IPO 환경에 미치는 영향)
+    
+    ---
+    
+    <b>🎯 오늘/이번 주 핵심 액션 플랜</b>
+    - (신규 딜 검토, 펀드레이징, 포트폴리오 밸류업 등 수익 창출 및 기업 가치 향상 관점에서 집중할 최우선 액션 1가지)
+        """
+        role_description = "You are a highly experienced Private Equity Fund (PEF) General Partner (GP) and Chief Investment Officer (CIO).\n    Based on the provided Market Data and News Articles (which encompass macro economy, stock market, and M&A/PEF news), write a deep and insightful morning briefing tailored for other GPs and LPs."
+        specific_instructions = "- **Specifics**: Combine real data from articles with realistic, high-level PEF GP insights."
+    else:
+        role_description = "You are a top-tier Financial Analyst.\n    Based on the provided Market Data and News Articles, write a Report."
+        specific_instructions = "- **Specifics**: Use ACTUAL numbers from the articles."
+
     prompt = f"""
-    You are a top-tier Financial Analyst.
-    Based on the provided Market Data and News Articles, write a Report.
+    {role_description}
     
     **Format Requirements (Strictly Follow This Structure)**:
     {prompt_content}
@@ -450,7 +488,7 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
         - **Lists**: Use hyphens (-) or emojis for lists. Do NOT use <ul>/<li>.
         - **Newlines**: Use actual newlines instead of <br> or <p>.
         - **Colors**: Do NOT use <font color="...">. Use emojis like 🔴 (Red/Up/Hot) or 🔵 (Blue/Cool/Down) or 🔻/🔺 to represent direction/sentiment.
-    - **Specifics**: Use ACTUAL numbers from the articles.
+    {specific_instructions}
     """
     
     # Retry logic with Model Fallback
@@ -482,15 +520,19 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     return "Error: Failed to generate briefing with all available models."
 
 # --- Notifier Module ---
-def send_telegram_message(message):
+def send_telegram_message(message, target="general"):
     """
     Sends a message to a Telegram channel.
     """
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
+    if target == "pef":
+        bot_token = os.getenv("TELEGRAM_PEF_BOT_TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+        channel_id = os.getenv("TELEGRAM_PEF_CHANNEL_ID")
+    else:
+        bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+        channel_id = os.getenv("TELEGRAM_CHANNEL_ID")
     
     if not bot_token or not channel_id:
-        logging.error("Error: TELEGRAM_BOT_TOKEN or TELEGRAM_CHANNEL_ID not found.")
+        logging.error(f"Error: Telegram credentials not found for target '{target}'.")
         return False
         
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
@@ -582,39 +624,70 @@ def main():
     logging.info("1. Fetching Market Data...")
     market_data = fetch_market_data()
     
-    # 2. Fetch & Scrape News (Pass Mode & Holiday Status)
-    logging.info("2. Fetching & Scraping News...")
     # Pass US holiday status for news fetching logic
-    news_context = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday)
+    news_context_general = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
     
     # 3. Generate Briefing (Pass Mode & Holiday Context)
-    logging.info("3. Generating Briefing using Gemini...")
-    briefing = generate_briefing(
+    logging.info("3. Generating General Briefing using Gemini...")
+    briefing_general = generate_briefing(
         market_data, 
-        news_context, 
+        news_context_general, 
         mode=mode,
         is_us_holiday=is_us_holiday_prev_close,
         is_kr_holiday=is_kr_holiday,
         holiday_name_kr=holiday_name_kr,
-        holiday_name_us=holiday_name_us
+        holiday_name_us=holiday_name_us,
+        target="general"
     )
     
     # 4. Print to Console
     logging.info("\n" + "="*50)
     # We want this in the log file too, so usage of info is correct
-    logging.info(briefing) 
+    logging.info(briefing_general) 
     logging.info("="*50 + "\n")
     
     # 5. Send to Telegram
     # Skip if 'test' in args
     if "test" in args or "--test" in args:
-         logging.info("4. Sending to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("4. Sending General Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
-        logging.info("4. Sending to Telegram...")
-        if os.getenv("TELEGRAM_BOT_TOKEN") and os.getenv("TELEGRAM_CHANNEL_ID"):
-            send_telegram_message(briefing)
+        logging.info("4. Sending General Briefing to Telegram...")
+        send_telegram_message(briefing_general, target="general")
+        
+    # --- PEF GP Briefing ---
+    logging.info("\n--- Starting PEF GP Briefing Sequence ---")
+    
+    # 6. Fetch additional PEF News
+    logging.info("5. Fetching & Scraping PEF News...")
+    news_context_pef = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="pef")
+    
+    # 7. Generate PEF Briefing
+    logging.info("6. Generating PEF Briefing using Gemini...")
+    briefing_pef = generate_briefing(
+        market_data, 
+        news_context_pef, 
+        mode=mode,
+        is_us_holiday=is_us_holiday_prev_close,
+        is_kr_holiday=is_kr_holiday,
+        holiday_name_kr=holiday_name_kr,
+        holiday_name_us=holiday_name_us,
+        target="pef"
+    )
+    
+    # 8. Print PEF Briefing to Console
+    logging.info("\n" + "="*50)
+    logging.info(briefing_pef) 
+    logging.info("="*50 + "\n")
+    
+    # 9. Send PEF Briefing to Telegram
+    if "test" in args or "--test" in args:
+         logging.info("7. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
+    else:
+        logging.info("7. Sending PEF Briefing to Telegram...")
+        if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
+            send_telegram_message(briefing_pef, target="pef")
         else:
-            logging.info("Skipping Telegram send (Credentials not found in .env)")
+            logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")
 
 if __name__ == "__main__":
     main()
