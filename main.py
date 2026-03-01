@@ -215,6 +215,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
     
     combined_news_context = ""
     seen_links = set()
+    collected_links = [] # List to store (title, link)
     
     logging.info("   Fetching news and scraping content...")
     
@@ -240,14 +241,16 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
                     combined_news_context += f"Date: {entry.published}\n"
                     combined_news_context += f"Content:\n{content}\n"
                     combined_news_context += f"--- ARTICLE END ---\n"
+                    collected_links.append((entry.title, entry.link))
                 else:
                     # Fallback to just title/snippet if scraping fails
                     combined_news_context += f"\nTitle: {entry.title}\nLink: {entry.link}\n(Content scraping failed)\n"
+                    collected_links.append((entry.title, entry.link))
                     
         except Exception as e:
             logging.error(f"   Error fetching RSS for {query}: {e}")
             
-    return combined_news_context
+    return combined_news_context, collected_links
 
 # --- Summarizer Module ---
 def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general"):
@@ -625,7 +628,7 @@ def main():
     market_data = fetch_market_data()
     
     # Pass US holiday status for news fetching logic
-    news_context_general = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
+    news_context_general, _ = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
     
     # 3. Generate Briefing (Pass Mode & Holiday Context)
     logging.info("3. Generating General Briefing using Gemini...")
@@ -659,7 +662,7 @@ def main():
     
     # 6. Fetch additional PEF News
     logging.info("5. Fetching & Scraping PEF News...")
-    news_context_pef = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="pef")
+    news_context_pef, pef_links = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="pef")
     
     # 7. Generate PEF Briefing
     logging.info("6. Generating PEF Briefing using Gemini...")
@@ -673,6 +676,14 @@ def main():
         holiday_name_us=holiday_name_us,
         target="pef"
     )
+    
+    # Append the source links list for the PEF target
+    if pef_links:
+        links_section = "\n\n<b>🔗 금일 수집된 주요 뉴스 링크</b>\n"
+        for title, link in pef_links:
+            # Telegram HTML formatting for links
+            links_section += f"- <a href='{link}'>{title}</a>\n"
+        briefing_pef += links_section
     
     # 8. Print PEF Briefing to Console
     logging.info("\n" + "="*50)
