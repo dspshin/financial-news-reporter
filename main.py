@@ -153,7 +153,7 @@ def scrape_article_content(url):
         logging.error(f"   Failed to scrape {url}: {e}")
         return None
 
-def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target="general"):
+def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target="general", initial_seen_links=None):
     """
     Fetches top economic news using Google News RSS with specific search queries
     based on the mode (weekday/saturday/sunday) and holiday status.
@@ -214,13 +214,15 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
         ])
     
     combined_news_context = ""
-    seen_links = set()
+    seen_links = set(initial_seen_links) if initial_seen_links else set()
     collected_links = [] # List to store (title, link)
     
     logging.info("   Fetching news and scraping content...")
     
     for query in queries:
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR%3Ako"
+        # Append ' when:1d' to the query to restrict results to the past 24 hours
+        time_restricted_query = f"{query} when:1d"
+        rss_url = f"https://news.google.com/rss/search?q={time_restricted_query}&hl=ko&gl=KR&ceid=KR%3Ako"
         try:
             response = requests.get(rss_url, timeout=10)
             feed = feedparser.parse(response.content)
@@ -250,7 +252,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
         except Exception as e:
             logging.error(f"   Error fetching RSS for {query}: {e}")
             
-    return combined_news_context, collected_links
+    return combined_news_context, collected_links, seen_links
 
 # --- Summarizer Module ---
 def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general"):
@@ -628,7 +630,7 @@ def main():
     market_data = fetch_market_data()
     
     # Pass US holiday status for news fetching logic
-    news_context_general, _ = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
+    news_context_general, _, seen_links_general = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
     
     # 3. Generate Briefing (Pass Mode & Holiday Context)
     logging.info("3. Generating General Briefing using Gemini...")
@@ -662,7 +664,13 @@ def main():
     
     # 6. Fetch additional PEF News
     logging.info("5. Fetching & Scraping PEF News...")
-    news_context_pef, pef_links = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="pef")
+    news_context_pef, pef_links, _ = fetch_news(
+        mode=mode, 
+        is_us_holiday=is_us_holiday_prev_close, 
+        is_kr_holiday=is_kr_holiday, 
+        target="pef",
+        initial_seen_links=seen_links_general
+    )
     
     # 7. Generate PEF Briefing
     logging.info("6. Generating PEF Briefing using Gemini...")
