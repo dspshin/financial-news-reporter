@@ -10,7 +10,8 @@
     - **평일 (월~금)**: 한국 증시 데일리 전망 및 전략
     - **토요일**: 미 증시 마감 기준 글로벌 증시 주간 요약
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
-- **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다.
+- **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하여, GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
+- **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **휴장일 자동 감지**:
     - **한국 증시 휴장일**: "오늘의 증시 전망" 대신 글로벌 시황 위주의 리포트 작성
     - **미국 증시 휴장일**: 전일 마감 데이터 부재 시 일반 미국 경제 뉴스 위주 분석
@@ -41,6 +42,11 @@ GEMINI_API_KEY=your_gemini_api_key_here
 # Telegram 설정 (https://core.telegram.org/bots)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
 TELEGRAM_CHANNEL_ID=your_channel_id_here
+
+# PEF 전용 Telegram 설정 (선택 사항)
+# TELEGRAM_PEF_BOT_TOKEN 미설정 시 기본 TELEGRAM_BOT_TOKEN 사용
+TELEGRAM_PEF_BOT_TOKEN=your_pef_bot_token_here
+TELEGRAM_PEF_CHANNEL_ID=your_pef_channel_id_here
 ```
 
 ## 📖 사용 방법 (Usage)
