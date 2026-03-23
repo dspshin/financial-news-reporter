@@ -497,7 +497,7 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     """
     
     # Retry logic with Model Fallback
-    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash']
+    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-flash-lite-preview']
     
     logging.info(f"   [Debug] Generating briefing for mode: {mode}")
     
