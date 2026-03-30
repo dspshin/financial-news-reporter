@@ -10,7 +10,8 @@
     - **평일 (월~금)**: 한국 증시 데일리 전망 및 전략
     - **토요일**: 미 증시 마감 기준 글로벌 증시 주간 요약
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
-- **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하여, GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
+- **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
+- **IT PMI 관점 보강**: PEF 브리핑에서 Day-1, TSA, ERP/데이터 통합, 사이버보안, 100일 실행계획 등 IT PMI 시사점을 함께 정리합니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **휴장일 자동 감지**:
     - **한국 증시 휴장일**: "오늘의 증시 전망" 대신 글로벌 시황 위주의 리포트 작성
@@ -47,6 +48,10 @@ TELEGRAM_CHANNEL_ID=your_channel_id_here
 # TELEGRAM_PEF_BOT_TOKEN 미설정 시 기본 TELEGRAM_BOT_TOKEN 사용
 TELEGRAM_PEF_BOT_TOKEN=your_pef_bot_token_here
 TELEGRAM_PEF_CHANNEL_ID=your_pef_channel_id_here
+
+# PEF 브리핑 개인화 (선택 사항)
+PEF_FIRM_NAME=Baikal Investment
+PEF_PMI_ROLE=IT PMI Lead
 ```
 
 ## 📖 사용 방법 (Usage)
@@ -68,13 +73,13 @@ python main.py --mode sunday
 
 # 테스트 모드와 함께 사용 (텔레그램 전송 생략)
 python main.py --mode sunday test
+```
 
 ### 특정 날짜 테스트 (Date Test)
 특정 날짜를 기준으로 휴장일 등을 테스트할 수 있습니다.
 ```bash
 # 2024년 크리스마스 기준 실행 (한국 휴장 감지)
 python main.py --date 2024-12-25 --test
-```
 ```
 
 ### 테스트 모드 실행

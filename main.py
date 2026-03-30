@@ -49,6 +49,66 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+PEF_HARD_EXCLUDE_KEYWORDS = [
+    "태풍", "강풍", "폭우", "산불", "지진", "홍수", "한파", "폭염",
+    "연예", "가수", "배우", "콘서트", "축제", "경기 결과", "야구", "축구",
+    "농구", "배구", "epl", "kbo", "nba", "mlb"
+]
+
+PEF_SOFT_EXCLUDE_KEYWORDS = [
+    "채용", "신제품", "출시", "프로모션", "이벤트", "전시", "리뷰", "쿠폰",
+    "할인", "신차", "영화", "드라마", "공연"
+]
+
+PEF_STRONG_SIGNAL_KEYWORDS = [
+    "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
+    "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "spin-off",
+    "ipo", "상장", "엑시트", "회수", "리파이낸싱", "인수금융", "대주단",
+    "드라이파우더", "private credit", "사모대출", "밸류업", "구조조정",
+    "turnaround", "운영효율화", "pmi", "tsa", "day-1", "day 1"
+]
+
+PEF_CATEGORY_KEYWORDS = {
+    "deal_sourcing": [
+        "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
+        "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "분할 매각"
+    ],
+    "financing_exit": [
+        "인수금융", "리파이낸싱", "대주단", "회사채", "차환", "유동성",
+        "private credit", "사모대출", "상장", "ipo", "엑시트", "회수"
+    ],
+    "portfolio_ops": [
+        "밸류업", "구조조정", "턴어라운드", "turnaround", "운영효율화",
+        "원가절감", "현금흐름", "거버넌스", "포트폴리오", "시너지"
+    ],
+    "it_pmi": [
+        "전산", "전산 통합", "it 통합", "it 인프라", "erp", "sap", "crm",
+        "클라우드", "데이터센터", "사이버", "보안", "cyber", "데이터 거버넌스",
+        "시스템 통합", "애플리케이션", "application", "tsa", "day-1", "day 1", "분리"
+    ],
+    "macro_regulation": [
+        "금리", "관세", "규제", "정책", "환율", "공정위", "금감원", "반독점",
+        "유가", "원자재", "거시", "매크로"
+    ],
+}
+
+PEF_CATEGORY_LABELS = {
+    "deal_sourcing": "Deal Sourcing",
+    "financing_exit": "Financing & Exit",
+    "portfolio_ops": "Portfolio Ops",
+    "it_pmi": "IT PMI",
+    "macro_regulation": "Macro & Regulation",
+}
+
+PEF_TRUSTED_SOURCE_KEYWORDS = [
+    "연합인포맥스", "연합뉴스", "한국경제", "매일경제", "머니투데이", "더벨",
+    "딜사이트", "reuters", "bloomberg", "financial times", "wsj", "wall street journal"
+]
+
+PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
+    "냉동공조저널", "기계신문", "주달", "ipdaily"
+]
+
 
 # --- Logging Configuration ---
 def setup_logging():
@@ -74,6 +134,101 @@ def setup_logging():
     console_formatter = logging.Formatter('%(message)s') # Keep console clean
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
+
+
+def normalize_text(*parts):
+    return " ".join(part for part in parts if part).lower()
+
+
+def extract_article_source(title):
+    parts = title.rsplit(" - ", 1)
+    return parts[1].strip() if len(parts) == 2 else "Unknown"
+
+
+def evaluate_pef_article(title, link, content):
+    """
+    Score a candidate article for PEF usefulness before it reaches the prompt.
+    """
+    source = extract_article_source(title)
+    text = normalize_text(title, content, source, link)
+
+    hard_noise_hits = sorted({kw for kw in PEF_HARD_EXCLUDE_KEYWORDS if kw in text})
+    soft_noise_hits = sorted({kw for kw in PEF_SOFT_EXCLUDE_KEYWORDS if kw in text})
+    strong_signal_hits = sorted({kw for kw in PEF_STRONG_SIGNAL_KEYWORDS if kw in text})
+
+    categories = []
+    category_reason_samples = []
+    score = 0
+
+    for category, keywords in PEF_CATEGORY_KEYWORDS.items():
+        hits = [kw for kw in keywords if kw in text]
+        if hits:
+            categories.append(category)
+            score += 2 if category in {"deal_sourcing", "financing_exit", "it_pmi"} else 1
+            label = PEF_CATEGORY_LABELS.get(category, category)
+            category_reason_samples.append(f"{label}:{', '.join(hits[:2])}")
+
+    if strong_signal_hits:
+        score += min(len(strong_signal_hits), 3) * 2
+
+    if content:
+        if len(content) >= 250:
+            score += 1
+        elif len(content) < 120:
+            score -= 1
+    else:
+        score -= 1
+
+    source_lower = source.lower()
+    trusted_source = any(token.lower() in source_lower for token in PEF_TRUSTED_SOURCE_KEYWORDS)
+    low_signal_source = any(token.lower() in source_lower for token in PEF_LOW_SIGNAL_SOURCE_KEYWORDS)
+
+    if trusted_source:
+        score += 2
+    if low_signal_source:
+        score -= 2
+    if hard_noise_hits:
+        score -= 6
+    if soft_noise_hits:
+        score -= 2
+
+    categories_set = set(categories)
+    has_core_signal = bool(
+        strong_signal_hits
+        or (categories_set - {"macro_regulation"})
+        or ("macro_regulation" in categories_set and trusted_source)
+    )
+    accepted = score >= 3 and has_core_signal and not hard_noise_hits
+
+    reasons = []
+    if strong_signal_hits:
+        reasons.append(f"signal:{', '.join(strong_signal_hits[:3])}")
+    reasons.extend(category_reason_samples[:3])
+    if trusted_source:
+        reasons.append(f"trusted_source:{source}")
+    if low_signal_source:
+        reasons.append(f"low_signal_source:{source}")
+    if soft_noise_hits:
+        reasons.append(f"soft_noise:{', '.join(soft_noise_hits[:2])}")
+    if hard_noise_hits:
+        reasons.append(f"hard_noise:{', '.join(hard_noise_hits[:2])}")
+    if not content:
+        reasons.append("missing_content")
+
+    return {
+        "accepted": accepted,
+        "score": score,
+        "source": source,
+        "categories": [PEF_CATEGORY_LABELS.get(category, category) for category in categories],
+        "reasons": reasons or ["no_strong_signal"],
+    }
+
+
+def get_pef_persona_config():
+    return {
+        "firm_name": os.getenv("PEF_FIRM_NAME", "Baikal Investment"),
+        "pmi_role": os.getenv("PEF_PMI_ROLE", "IT PMI Lead"),
+    }
 
 # --- Data Fetcher Module ---
 def fetch_market_data():
@@ -210,7 +365,9 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
         queries.extend([
             "사모펀드",
             "M&A 인수합병",
-            "PEF 투자"
+            "PEF 투자",
+            "M&A PMI",
+            "IT 통합"
         ])
     
     combined_news_context = ""
@@ -236,17 +393,32 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
                 logging.info(f"   - Processing: {entry.title}")
                 content = scrape_article_content(entry.link)
                 
+                if target == "pef":
+                    pef_meta = evaluate_pef_article(entry.title, entry.link, content)
+                    decision = "ACCEPT" if pef_meta["accepted"] else "REJECT"
+                    logging.info(
+                        f"   [PEF Filter] {decision} score={pef_meta['score']} "
+                        f"source={pef_meta['source']} categories={', '.join(pef_meta['categories']) or 'None'}"
+                    )
+                    if not pef_meta["accepted"]:
+                        logging.info(f"      reasons: {', '.join(pef_meta['reasons'])}")
+                        continue
+
                 if content:
                     combined_news_context += f"\n\n--- ARTICLE START ---\n"
                     combined_news_context += f"Title: {entry.title}\n"
                     combined_news_context += f"Link: {entry.link}\n"
                     combined_news_context += f"Date: {entry.published}\n"
+                    if target == "pef":
+                        combined_news_context += f"Category: {', '.join(pef_meta['categories'])}\n"
                     combined_news_context += f"Content:\n{content}\n"
                     combined_news_context += f"--- ARTICLE END ---\n"
                     collected_links.append((entry.title, entry.link))
                 else:
                     # Fallback to just title/snippet if scraping fails
                     combined_news_context += f"\nTitle: {entry.title}\nLink: {entry.link}\n(Content scraping failed)\n"
+                    if target == "pef":
+                        combined_news_context += f"Category: {', '.join(pef_meta['categories'])}\n"
                     collected_links.append((entry.title, entry.link))
                     
         except Exception as e:
@@ -255,7 +427,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
     return combined_news_context, collected_links, seen_links
 
 # --- Summarizer Module ---
-def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general"):
+def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general", briefing_date=None):
     """
     Generates a daily economic briefing using Gemini 2.0 Flash with a structured analyst persona.
     """
@@ -266,7 +438,8 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     genai.configure(api_key=api_key)
     
     # Construct the prompt
-    today = datetime.now().strftime("%m/%d(%a)")
+    reference_date = briefing_date or datetime.now().date()
+    today = reference_date.strftime("%m/%d(%a)")
     
     market_summary = "## Market Data Indices\n"
     if market_data:
@@ -444,32 +617,75 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
         """
 
     if target == "pef":
-        today_title = f"<b>👔 {today} PEF GP 인사이트 브리핑{kr_holiday_text}</b>"
+        pef_context = get_pef_persona_config()
+        firm_name = pef_context["firm_name"]
+        pmi_role = pef_context["pmi_role"]
         prompt_content = f"""
-    {today_title}
+    <b>👔 {today} {firm_name} GP & {pmi_role} 인사이트 브리핑{kr_holiday_text}</b>
     
-    <b>📊 매크로 및 딜 환경 점검</b>
-    - (주요 경제 지표 및 증시 상황이 출자자(LP) 및 딜 소싱에 미칠 핵심 영향 한 줄 평)
+    <b>📊 오늘의 투자위원회 한 줄 판단</b>
+    - (딜 환경, 자금 조달 여건, 포트폴리오 운영 환경을 1-2문장으로 압축 요약)
     
-    <b>🗞️ 주요 M&A 및 매크로 뉴스</b>
-    - (일반 경제 및 사모펀드/M&A 관련 가장 핵심적인 뉴스 3-4개 압축 요약)
+    <b>🗞️ 핵심 뉴스와 {firm_name} 시사점</b>
+    <b>1. (핵심 테마/기사)</b>
+    - <b>사실</b>: (팩트 요약)
+    - <b>{firm_name} 시사점</b>: (신규 딜, 밸류에이션, 엑시트, 포트폴리오 영향)
+    - <b>추가 확인 데이터</b>: (숫자, 공시, 시장 데이터)
+    
+    <b>2. (핵심 테마/기사)</b>
+    - <b>사실</b>: (팩트 요약)
+    - <b>{firm_name} 시사점</b>: (투자 판단과 연결)
+    - <b>추가 확인 데이터</b>: (검증 포인트)
     
     ---
     
-    <b>💡 PEF GP의 딥다이브 인사이트</b>
-    <b>1. 딜 소싱 및 섹터 동향 (Deal Sourcing)</b>
-    - (현재 매크로 뉴스를 기반으로 주목해야 할 매물, 유망 섹터, 투자 리스크 분석)
+    <b>💼 GP 관점 핵심 판단</b>
+    <b>1. 소싱 및 언더라이팅</b>
+    - (어떤 섹터/자산을 더 볼지, 무엇을 조심할지)
     
-    <b>2. 밸류에이션 및 엑시트 환경 (Valuation & Exit)</b>
-    - (시장 금리와 유동성이 포트폴리오 기업 가치 및 매각/IPO 환경에 미치는 영향)
+    <b>2. 자금조달, 밸류에이션, 엑시트</b>
+    - (인수금융, 금리, 멀티플, 회수 창구 관점)
+    
+    <b>3. 포트폴리오 밸류업</b>
+    - (원가, 가격, 현금흐름, 조직, 거버넌스 관점)
+    
+    ---
+    
+    <b>🖥️ {pmi_role} 관점 체크포인트</b>
+    <b>1. Day-1 / TSA / Carve-out 준비</b>
+    - (분리/통합 일정, 의존 시스템, 서비스 연속성 리스크)
+    
+    <b>2. 사이버보안 / 데이터 / 규제</b>
+    - (보안 사고, 개인정보, 데이터 이전, 접근권한 이슈)
+    
+    <b>3. ERP / 애플리케이션 / 인프라 통합</b>
+    - (ERP, CRM, 데이터, 클라우드, 네트워크, 앱 합리화 관점)
+    
+    <b>4. 100일 실행과 시너지 캡처</b>
+    - (시너지 실현을 위해 지금 바로 필요한 IT 실행 항목)
     
     ---
     
     <b>🎯 오늘/이번 주 핵심 액션 플랜</b>
-    - (신규 딜 검토, 펀드레이징, 포트폴리오 밸류업 등 수익 창출 및 기업 가치 향상 관점에서 집중할 최우선 액션 1가지)
+    <b>GP Action</b>
+    - (투자팀이 오늘 확인/실행할 일 1-2개)
+    
+    <b>{pmi_role} Action</b>
+    - (IT PMI 관점에서 바로 점검할 일 1-2개)
         """
-        role_description = "You are a highly experienced Private Equity Fund (PEF) General Partner (GP) and Chief Investment Officer (CIO).\n    Based on the provided Market Data and News Articles (which encompass macro economy, stock market, and M&A/PEF news), write a deep and insightful morning briefing tailored for other GPs and LPs."
-        specific_instructions = "- **Specifics**: Combine real data from articles with realistic, high-level PEF GP insights."
+        role_description = (
+            f"You are the internal morning-briefing writer for {firm_name}, a Korea-focused private equity GP.\n"
+            f"Your audience is the deal team, investment committee, operating partners, and an {pmi_role}.\n"
+            "Write like an actionable internal memo, not a public newsletter."
+        )
+        specific_instructions = f"""
+    - **Perspective**: Prioritize implications for sourcing, underwriting, financing, exit, and portfolio value creation.
+    - **IT PMI**: Explicitly call out Day-1 readiness, TSA/separation risk, cybersecurity, ERP/data/application integration, and synergy-capture implications.
+    - **Inference**: If a news item is not directly about technology, infer the most plausible IT PMI implications and clearly label that part as inference.
+    - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
+    - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
+    - **Length**: Keep the full briefing concise enough for one Telegram message when possible.
+    """
     else:
         role_description = "You are a top-tier Financial Analyst.\n    Based on the provided Market Data and News Articles, write a Report."
         specific_instructions = "- **Specifics**: Use ACTUAL numbers from the articles."
@@ -642,7 +858,8 @@ def main():
         is_kr_holiday=is_kr_holiday,
         holiday_name_kr=holiday_name_kr,
         holiday_name_us=holiday_name_us,
-        target="general"
+        target="general",
+        briefing_date=today
     )
     
     # 4. Print to Console
@@ -682,7 +899,8 @@ def main():
         is_kr_holiday=is_kr_holiday,
         holiday_name_kr=holiday_name_kr,
         holiday_name_us=holiday_name_us,
-        target="pef"
+        target="pef",
+        briefing_date=today
     )
     
     # Append the source links list for the PEF target
