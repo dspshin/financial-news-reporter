@@ -5,6 +5,8 @@ import yfinance as yf
 import feedparser
 import google.generativeai as genai
 import holidays
+import html
+import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
@@ -108,6 +110,8 @@ PEF_TRUSTED_SOURCE_KEYWORDS = [
 PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
     "냉동공조저널", "기계신문", "주달", "ipdaily"
 ]
+
+TELEGRAM_MESSAGE_LIMIT = 3900
 
 
 # --- Logging Configuration ---
@@ -229,6 +233,113 @@ def get_pef_persona_config():
         "firm_name": os.getenv("PEF_FIRM_NAME", "Baikal Investment"),
         "pmi_role": os.getenv("PEF_PMI_ROLE", "IT PMI Lead"),
     }
+
+
+def split_message(message, limit=TELEGRAM_MESSAGE_LIMIT):
+    """
+    Split a long Telegram message into line-aware chunks that stay within the limit.
+    """
+    if len(message) <= limit:
+        return [message]
+
+    chunks = []
+    current = ""
+
+    for line in message.splitlines(keepends=True):
+        if len(current) + len(line) <= limit:
+            current += line
+            continue
+
+        if current.strip():
+            chunks.append(current.rstrip())
+            current = ""
+
+        while len(line) > limit:
+            split_at = line.rfind("\n", 0, limit)
+            if split_at <= 0:
+                split_at = line.rfind(" ", 0, limit)
+            if split_at <= 0:
+                split_at = limit
+
+            chunk = line[:split_at].rstrip()
+            if chunk:
+                chunks.append(chunk)
+            line = line[split_at:].lstrip("\n")
+
+        current = line
+
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    return chunks
+
+
+def sanitize_telegram_html(message):
+    """
+    Escape raw ampersands, which frequently break Telegram HTML parsing.
+    """
+    return re.sub(r"&(?!#?\w+;)", "&amp;", message)
+
+
+def convert_html_to_plain_text(message):
+    """
+    Convert a Telegram HTML message into plain text while preserving links.
+    """
+    anchor_pattern = re.compile(r"<a\s+href=(['\"])(.*?)\1>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+
+    def replace_anchor(match):
+        url = html.unescape(match.group(2).strip())
+        label = BeautifulSoup(match.group(3), "html.parser").get_text(" ", strip=True)
+        label = html.unescape(label)
+        return f"{label} ({url})" if label else url
+
+    plain_message = anchor_pattern.sub(replace_anchor, message)
+    plain_message = re.sub(r"</?(b|i|u|s|code|pre)>", "", plain_message, flags=re.IGNORECASE)
+    plain_message = BeautifulSoup(plain_message, "html.parser").get_text("\n")
+    plain_message = html.unescape(plain_message)
+    plain_message = re.sub(r"\n{3,}", "\n\n", plain_message)
+    return plain_message.strip()
+
+
+def send_telegram_chunks(url, chat_id, message, parse_mode=None):
+    """
+    Send one logical message to Telegram, splitting into multiple chunks if needed.
+    """
+    chunks = split_message(message)
+    total_chunks = len(chunks)
+
+    for idx, chunk in enumerate(chunks, start=1):
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "disable_web_page_preview": True
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+
+        logging.info(
+            f"   Sending Telegram chunk {idx}/{total_chunks} "
+            f"({len(chunk)} chars, mode={parse_mode or 'PLAIN'})..."
+        )
+        response = requests.post(url, json=payload, timeout=15)
+        if response.ok:
+            continue
+
+        return False, response
+
+    return True, None
+
+
+def build_news_links_message(links, title="🔗 금일 수집된 주요 뉴스 링크"):
+    if not links:
+        return None
+
+    lines = [f"<b>{html.escape(title)}</b>"]
+    for article_title, article_link in links:
+        safe_title = html.escape(article_title)
+        safe_link = html.escape(article_link, quote=True)
+        lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
+    return "\n".join(lines)
 
 # --- Data Fetcher Module ---
 def fetch_market_data():
@@ -757,35 +868,59 @@ def send_telegram_message(message, target="general"):
         return False
         
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    
-    # Try sending with HTML first
-    payload = {
-        "chat_id": channel_id,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    
+
+    sanitized_html_message = sanitize_telegram_html(message)
+    logging.info(
+        f"   Prepared Telegram message for target='{target}' "
+        f"(raw={len(message)} chars, html_sanitized={len(sanitized_html_message)} chars)."
+    )
+
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
-        logging.info("Message sent successfully to Telegram.")
-        return True
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 400:
-            logging.warning(f"   [Warning] HTML parse failed (400 Bad Request). Retrying with plain text fallback...")
-            # Remove parse_mode to send as plain text
-            payload.pop("parse_mode")
-            try:
-                response = requests.post(url, json=payload)
-                response.raise_for_status()
+        success, response = send_telegram_chunks(
+            url,
+            channel_id,
+            sanitized_html_message,
+            parse_mode="HTML"
+        )
+        if success:
+            logging.info("Message sent successfully to Telegram.")
+            return True
+
+        response_text = response.text[:500] if response is not None else "No response body"
+        if response is not None and response.status_code == 400:
+            logging.warning(
+                f"   [Warning] HTML send failed with 400 Bad Request. "
+                f"Telegram response: {response_text}"
+            )
+            plain_text_message = convert_html_to_plain_text(message)
+            logging.info(
+                f"   Retrying Telegram send in plain text "
+                f"({len(plain_text_message)} chars after HTML stripping)."
+            )
+            fallback_success, fallback_response = send_telegram_chunks(
+                url,
+                channel_id,
+                plain_text_message
+            )
+            if fallback_success:
                 logging.info("Message sent successfully to Telegram (Plain Text Fallback).")
                 return True
-            except Exception as e2:
-                logging.error(f"   Error sending fallback message: {e2}")
-                return False
-        else:
-            logging.error(f"Error sending message: {e}")
+
+            fallback_response_text = (
+                fallback_response.text[:500] if fallback_response is not None else "No response body"
+            )
+            logging.error(
+                "   Error sending fallback message: "
+                f"{fallback_response.status_code if fallback_response is not None else 'N/A'} "
+                f"Telegram response: {fallback_response_text}"
+            )
             return False
+
+        logging.error(
+            f"Error sending message: status={response.status_code if response is not None else 'N/A'} "
+            f"response={response_text}"
+        )
+        return False
     except requests.exceptions.RequestException as e:
         logging.error(f"Error sending message: {e}")
         return False
@@ -903,13 +1038,7 @@ def main():
         briefing_date=today
     )
     
-    # Append the source links list for the PEF target
-    if pef_links:
-        links_section = "\n\n<b>🔗 금일 수집된 주요 뉴스 링크</b>\n"
-        for title, link in pef_links:
-            # Telegram HTML formatting for links
-            links_section += f"- <a href='{link}'>{title}</a>\n"
-        briefing_pef += links_section
+    pef_links_message = build_news_links_message(pef_links)
     
     # 8. Print PEF Briefing to Console
     logging.info("\n" + "="*50)
@@ -922,7 +1051,10 @@ def main():
     else:
         logging.info("7. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
-            send_telegram_message(briefing_pef, target="pef")
+            pef_sent = send_telegram_message(briefing_pef, target="pef")
+            if pef_sent and pef_links_message:
+                logging.info("8. Sending PEF source links to Telegram...")
+                send_telegram_message(pef_links_message, target="pef")
         else:
             logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")
 
