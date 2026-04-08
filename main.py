@@ -67,17 +67,26 @@ PEF_STRONG_SIGNAL_KEYWORDS = [
     "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "spin-off",
     "ipo", "상장", "엑시트", "회수", "리파이낸싱", "인수금융", "대주단",
     "드라이파우더", "private credit", "사모대출", "밸류업", "구조조정",
-    "turnaround", "운영효율화", "pmi", "tsa", "day-1", "day 1"
+    "turnaround", "운영효율화", "pmi", "tsa", "day-1", "day 1",
+    "pef", "지분 매각", "경영권 매각"
+]
+
+PEF_MEDIUM_SIGNAL_KEYWORDS = [
+    "사모펀드", "지분", "구주", "매물", "바이아웃", "바이사이드", "소수지분",
+    "투자 유치", "소송", "분쟁", "주주", "주주간계약", "펀드레이징",
+    "인프라", "에너지", "터미널", "발전소"
 ]
 
 PEF_CATEGORY_KEYWORDS = {
     "deal_sourcing": [
         "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
-        "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "분할 매각"
+        "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "분할 매각",
+        "지분", "지분 매각", "구주", "매물", "경영권 매각", "바이아웃", "소수지분"
     ],
     "financing_exit": [
         "인수금융", "리파이낸싱", "대주단", "회사채", "차환", "유동성",
-        "private credit", "사모대출", "상장", "ipo", "엑시트", "회수"
+        "private credit", "사모대출", "상장", "ipo", "엑시트", "회수",
+        "유상증자", "메자닌"
     ],
     "portfolio_ops": [
         "밸류업", "구조조정", "턴어라운드", "turnaround", "운영효율화",
@@ -92,6 +101,9 @@ PEF_CATEGORY_KEYWORDS = {
         "금리", "관세", "규제", "정책", "환율", "공정위", "금감원", "반독점",
         "유가", "원자재", "거시", "매크로"
     ],
+    "governance_legal": [
+        "소송", "분쟁", "주주간계약", "배임", "횡령", "책임론", "거버넌스"
+    ],
 }
 
 PEF_CATEGORY_LABELS = {
@@ -100,6 +112,7 @@ PEF_CATEGORY_LABELS = {
     "portfolio_ops": "Portfolio Ops",
     "it_pmi": "IT PMI",
     "macro_regulation": "Macro & Regulation",
+    "governance_legal": "Governance & Legal",
 }
 
 PEF_TRUSTED_SOURCE_KEYWORDS = [
@@ -108,10 +121,11 @@ PEF_TRUSTED_SOURCE_KEYWORDS = [
 ]
 
 PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
-    "냉동공조저널", "기계신문", "주달", "ipdaily"
+    "냉동공조저널", "기계신문", "주달", "ipdaily", "pressclub global", "brunch.co.kr"
 ]
 
 TELEGRAM_MESSAGE_LIMIT = 3900
+PEF_MIN_ACCEPTED_ARTICLES = 3
 
 
 # --- Logging Configuration ---
@@ -159,6 +173,7 @@ def evaluate_pef_article(title, link, content):
     hard_noise_hits = sorted({kw for kw in PEF_HARD_EXCLUDE_KEYWORDS if kw in text})
     soft_noise_hits = sorted({kw for kw in PEF_SOFT_EXCLUDE_KEYWORDS if kw in text})
     strong_signal_hits = sorted({kw for kw in PEF_STRONG_SIGNAL_KEYWORDS if kw in text})
+    medium_signal_hits = sorted({kw for kw in PEF_MEDIUM_SIGNAL_KEYWORDS if kw in text})
 
     categories = []
     category_reason_samples = []
@@ -174,6 +189,8 @@ def evaluate_pef_article(title, link, content):
 
     if strong_signal_hits:
         score += min(len(strong_signal_hits), 3) * 2
+    if medium_signal_hits:
+        score += min(len(medium_signal_hits), 2)
 
     if content:
         if len(content) >= 250:
@@ -199,14 +216,18 @@ def evaluate_pef_article(title, link, content):
     categories_set = set(categories)
     has_core_signal = bool(
         strong_signal_hits
+        or medium_signal_hits
         or (categories_set - {"macro_regulation"})
         or ("macro_regulation" in categories_set and trusted_source)
     )
     accepted = score >= 3 and has_core_signal and not hard_noise_hits
+    promotable = score >= 1 and has_core_signal and not hard_noise_hits and not low_signal_source
 
     reasons = []
     if strong_signal_hits:
         reasons.append(f"signal:{', '.join(strong_signal_hits[:3])}")
+    if medium_signal_hits:
+        reasons.append(f"medium_signal:{', '.join(medium_signal_hits[:3])}")
     reasons.extend(category_reason_samples[:3])
     if trusted_source:
         reasons.append(f"trusted_source:{source}")
@@ -225,7 +246,29 @@ def evaluate_pef_article(title, link, content):
         "source": source,
         "categories": [PEF_CATEGORY_LABELS.get(category, category) for category in categories],
         "reasons": reasons or ["no_strong_signal"],
+        "trusted_source": trusted_source,
+        "promotable": promotable,
     }
+
+
+def append_article_context(existing_context, entry, content, target="general", pef_meta=None):
+    article_context = ""
+
+    if content:
+        article_context += f"\n\n--- ARTICLE START ---\n"
+        article_context += f"Title: {entry.title}\n"
+        article_context += f"Link: {entry.link}\n"
+        article_context += f"Date: {entry.published}\n"
+        if target == "pef" and pef_meta:
+            article_context += f"Category: {', '.join(pef_meta['categories'])}\n"
+        article_context += f"Content:\n{content}\n"
+        article_context += f"--- ARTICLE END ---\n"
+    else:
+        article_context += f"\nTitle: {entry.title}\nLink: {entry.link}\n(Content scraping failed)\n"
+        if target == "pef" and pef_meta:
+            article_context += f"Category: {', '.join(pef_meta['categories'])}\n"
+
+    return existing_context + article_context
 
 
 def get_pef_persona_config():
@@ -478,12 +521,16 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
             "M&A 인수합병",
             "PEF 투자",
             "M&A PMI",
-            "IT 통합"
+            "IT 통합",
+            "지분 매각",
+            "경영권 매각",
+            "인수금융"
         ])
     
     combined_news_context = ""
     seen_links = set(initial_seen_links) if initial_seen_links else set()
     collected_links = [] # List to store (title, link)
+    rejected_pef_candidates = []
     
     logging.info("   Fetching news and scraping content...")
     
@@ -513,28 +560,62 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
                     )
                     if not pef_meta["accepted"]:
                         logging.info(f"      reasons: {', '.join(pef_meta['reasons'])}")
+                        if pef_meta["promotable"]:
+                            rejected_pef_candidates.append({
+                                "entry": entry,
+                                "content": content,
+                                "pef_meta": pef_meta
+                            })
                         continue
 
-                if content:
-                    combined_news_context += f"\n\n--- ARTICLE START ---\n"
-                    combined_news_context += f"Title: {entry.title}\n"
-                    combined_news_context += f"Link: {entry.link}\n"
-                    combined_news_context += f"Date: {entry.published}\n"
-                    if target == "pef":
-                        combined_news_context += f"Category: {', '.join(pef_meta['categories'])}\n"
-                    combined_news_context += f"Content:\n{content}\n"
-                    combined_news_context += f"--- ARTICLE END ---\n"
-                    collected_links.append((entry.title, entry.link))
-                else:
-                    # Fallback to just title/snippet if scraping fails
-                    combined_news_context += f"\nTitle: {entry.title}\nLink: {entry.link}\n(Content scraping failed)\n"
-                    if target == "pef":
-                        combined_news_context += f"Category: {', '.join(pef_meta['categories'])}\n"
-                    collected_links.append((entry.title, entry.link))
+                combined_news_context = append_article_context(
+                    combined_news_context,
+                    entry,
+                    content,
+                    target=target,
+                    pef_meta=pef_meta if target == "pef" else None
+                )
+                collected_links.append((entry.title, entry.link))
                     
         except Exception as e:
             logging.error(f"   Error fetching RSS for {query}: {e}")
-            
+
+    if target == "pef" and len(collected_links) < PEF_MIN_ACCEPTED_ARTICLES and rejected_pef_candidates:
+        needed = PEF_MIN_ACCEPTED_ARTICLES - len(collected_links)
+        logging.info(
+            f"   [PEF Filter] Accepted {len(collected_links)} articles; "
+            f"promoting up to {needed} borderline candidates for coverage."
+        )
+        rejected_pef_candidates.sort(
+            key=lambda candidate: (
+                candidate["pef_meta"]["score"],
+                1 if candidate["pef_meta"]["trusted_source"] else 0,
+                len(candidate["content"] or "")
+            ),
+            reverse=True
+        )
+
+        for candidate in rejected_pef_candidates:
+            if needed <= 0:
+                break
+            if any(link == candidate["entry"].link for _, link in collected_links):
+                continue
+
+            pef_meta = candidate["pef_meta"]
+            logging.info(
+                f"   [PEF Filter] PROMOTE score={pef_meta['score']} "
+                f"source={pef_meta['source']} categories={', '.join(pef_meta['categories']) or 'None'}"
+            )
+            combined_news_context = append_article_context(
+                combined_news_context,
+                candidate["entry"],
+                candidate["content"],
+                target="pef",
+                pef_meta=pef_meta
+            )
+            collected_links.append((candidate["entry"].title, candidate["entry"].link))
+            needed -= 1
+
     return combined_news_context, collected_links, seen_links
 
 # --- Summarizer Module ---
