@@ -124,8 +124,14 @@ PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
     "냉동공조저널", "기계신문", "주달", "ipdaily", "pressclub global", "brunch.co.kr"
 ]
 
+FIRM_SHORT_NAME_CONTEXT_KEYWORDS = [
+    "pef", "사모펀드", "m&a", "인수", "매각", "컨소시엄", "트랙레코드",
+    "임태호", "애큐온", "캐피탈", "저축은행", "운용사"
+]
+
 TELEGRAM_MESSAGE_LIMIT = 3900
 PEF_MIN_ACCEPTED_ARTICLES = 3
+PEF_FIRM_MENTION_MAX_ARTICLES = 5
 
 
 # --- Logging Configuration ---
@@ -258,7 +264,7 @@ def append_article_context(existing_context, entry, content, target="general", p
         article_context += f"\n\n--- ARTICLE START ---\n"
         article_context += f"Title: {entry.title}\n"
         article_context += f"Link: {entry.link}\n"
-        article_context += f"Date: {entry.published}\n"
+        article_context += f"Date: {getattr(entry, 'published', 'Unknown')}\n"
         if target == "pef" and pef_meta:
             article_context += f"Category: {', '.join(pef_meta['categories'])}\n"
         article_context += f"Content:\n{content}\n"
@@ -276,6 +282,61 @@ def get_pef_persona_config():
         "firm_name": os.getenv("PEF_FIRM_NAME", "Baikal Investment"),
         "pmi_role": os.getenv("PEF_PMI_ROLE", "IT PMI Lead"),
     }
+
+
+def parse_int_env(name, default):
+    try:
+        return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def build_firm_news_queries(firm_name):
+    firm_name = firm_name or ""
+    env_queries = os.getenv("PEF_FIRM_NEWS_QUERIES")
+    if env_queries:
+        return [query.strip() for query in env_queries.split(",") if query.strip()]
+
+    queries = {firm_name.strip()} if firm_name else set()
+    if "baikal" in firm_name.lower() or "바이칼" in firm_name:
+        queries.update({
+            "바이칼인베스트먼트",
+            "바이칼 인베스트먼트",
+            "바이칼인베",
+        })
+
+    return sorted(query for query in queries if query)
+
+
+def build_firm_match_terms(firm_name):
+    firm_name = firm_name or ""
+    terms = {firm_name.strip().lower()} if firm_name else set()
+    terms.update({query.lower() for query in build_firm_news_queries(firm_name)})
+    if "baikal" in firm_name.lower() or "바이칼" in firm_name:
+        terms.update({
+            "baikal investment",
+            "바이칼인베스트먼트",
+            "바이칼 인베스트먼트",
+            "바이칼인베",
+        })
+    return sorted(term for term in terms if term)
+
+
+def match_firm_mention(searchable_text, match_terms, firm_name):
+    if any(term in searchable_text for term in match_terms):
+        return True, "exact_name"
+
+    firm_name = firm_name or ""
+    if ("baikal" in firm_name.lower() or "바이칼" in firm_name) and "바이칼" in searchable_text:
+        if any(keyword in searchable_text for keyword in FIRM_SHORT_NAME_CONTEXT_KEYWORDS):
+            return True, "short_name_with_deal_context"
+
+    return False, "firm name not found in title/content"
+
+
+def normalize_title_for_dedupe(title):
+    normalized = re.sub(r"\s+", " ", title or "").strip().lower()
+    return re.sub(r"\s+-\s+[^-]+$", "", normalized)
 
 
 def split_message(message, limit=TELEGRAM_MESSAGE_LIMIT):
@@ -618,6 +679,90 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
 
     return combined_news_context, collected_links, seen_links
 
+
+def fetch_firm_mention_news(firm_name, initial_seen_links=None):
+    """
+    Fetches recent news that directly mentions the GP name.
+    This runs separately from the PEF filter so firm mentions are not lost.
+    """
+    lookback_days = max(1, parse_int_env("PEF_FIRM_NEWS_LOOKBACK_DAYS", 30))
+    queries = build_firm_news_queries(firm_name)
+    match_terms = build_firm_match_terms(firm_name)
+    seen_links = set(initial_seen_links) if initial_seen_links else set()
+    seen_titles = set()
+    combined_news_context = ""
+    collected_links = []
+
+    if not queries:
+        return combined_news_context, collected_links, seen_links
+
+    logging.info(
+        f"   [Target] Firm mentions: Searching {firm_name} news "
+        f"(lookback={lookback_days}d, queries={', '.join(queries)})"
+    )
+
+    for query in queries:
+        rss_query = f'"{query}" when:{lookback_days}d'
+        try:
+            response = requests.get(
+                "https://news.google.com/rss/search",
+                params={
+                    "q": rss_query,
+                    "hl": "ko",
+                    "gl": "KR",
+                    "ceid": "KR:ko",
+                },
+                timeout=10,
+            )
+            feed = feedparser.parse(response.content)
+
+            for entry in feed.entries[:5]:
+                if len(collected_links) >= PEF_FIRM_MENTION_MAX_ARTICLES:
+                    return combined_news_context, collected_links, seen_links
+
+                title_key = normalize_title_for_dedupe(entry.title)
+                if entry.link in seen_links or title_key in seen_titles:
+                    continue
+
+                logging.info(f"   - Firm mention candidate: {entry.title}")
+                content = scrape_article_content(entry.link)
+                searchable_text = normalize_text(entry.title, content, entry.link)
+                is_match, match_reason = match_firm_mention(searchable_text, match_terms, firm_name)
+                if not is_match:
+                    logging.info(f"      [Firm Mention] REJECT: {match_reason}")
+                    continue
+
+                seen_links.add(entry.link)
+                seen_titles.add(title_key)
+                logging.info(f"      [Firm Mention] ACCEPT: {match_reason}")
+
+                firm_context = ""
+                firm_context += f"\n\n--- FIRM MENTION ARTICLE START ---\n"
+                firm_context += f"Target Firm: {firm_name}\n"
+                firm_context += f"Title: {entry.title}\n"
+                firm_context += f"Link: {entry.link}\n"
+                firm_context += f"Date: {getattr(entry, 'published', 'Unknown')}\n"
+                firm_context += f"Content:\n{content or '(Content scraping failed)'}\n"
+                firm_context += f"--- FIRM MENTION ARTICLE END ---\n"
+                combined_news_context += firm_context
+                collected_links.append((entry.title, entry.link))
+
+        except Exception as e:
+            logging.error(f"   Error fetching firm mention RSS for {query}: {e}")
+
+    return combined_news_context, collected_links, seen_links
+
+
+def dedupe_links(links):
+    deduped = []
+    seen = set()
+    for title, link in links:
+        if link in seen:
+            continue
+        seen.add(link)
+        deduped.append((title, link))
+    return deduped
+
 # --- Summarizer Module ---
 def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general", briefing_date=None):
     """
@@ -843,18 +988,16 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     
     ---
     
-    <b>🖥️ {pmi_role} 관점 체크포인트</b>
-    <b>1. Day-1 / TSA / Carve-out 준비</b>
-    - (분리/통합 일정, 의존 시스템, 서비스 연속성 리스크)
+    <b>🧭 {firm_name} 언급 뉴스/회사명 레이더</b>
+    - (FIRM MENTION ARTICLE이 있으면, 기사에 등장한 회사/기관/인물을 1-3개만 리스트업하고 {firm_name} 관점의 의미를 한 줄로 정리)
+    - (직접 언급 뉴스가 없으면 "금일 수집 기준 직접 언급 뉴스 없음"으로 짧게 처리)
     
-    <b>2. 사이버보안 / 데이터 / 규제</b>
-    - (보안 사고, 개인정보, 데이터 이전, 접근권한 이슈)
+    ---
     
-    <b>3. ERP / 애플리케이션 / 인프라 통합</b>
-    - (ERP, CRM, 데이터, 클라우드, 네트워크, 앱 합리화 관점)
-    
-    <b>4. 100일 실행과 시너지 캡처</b>
-    - (시너지 실현을 위해 지금 바로 필요한 IT 실행 항목)
+    <b>🖥️ {pmi_role} 핵심 체크</b>
+    - <b>Day-1/TSA</b>: (분리/통합, 의존 시스템, 서비스 연속성에서 지금 확인할 1가지)
+    - <b>보안/데이터</b>: (사이버보안, 개인정보, 데이터 이전/접근권한에서 지금 확인할 1가지)
+    - <b>100일 IT 실행</b>: (ERP/앱/인프라/데이터 중 밸류업이나 리스크 완화에 바로 연결되는 1가지)
     
     ---
     
@@ -872,7 +1015,8 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
         )
         specific_instructions = f"""
     - **Perspective**: Prioritize implications for sourcing, underwriting, financing, exit, and portfolio value creation.
-    - **IT PMI**: Explicitly call out Day-1 readiness, TSA/separation risk, cybersecurity, ERP/data/application integration, and synergy-capture implications.
+    - **Firm mention radar**: Use only articles marked "FIRM MENTION ARTICLE" for the {firm_name} mention/news radar. Extract concrete company, institution, or person names from those articles. Do not invent names.
+    - **IT PMI**: Keep the IT PMI section to exactly 3 bullets. Make each bullet short, concrete, and tied to Day-1/TSA, security/data, or the first 100 days.
     - **Inference**: If a news item is not directly about technology, infer the most plausible IT PMI implications and clearly label that part as inference.
     - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
     - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
@@ -1094,22 +1238,32 @@ def main():
         
     # --- PEF GP Briefing ---
     logging.info("\n--- Starting PEF GP Briefing Sequence ---")
+    pef_context = get_pef_persona_config()
+
+    # 6. Fetch firm mention news first so direct mentions are preserved.
+    logging.info("5. Fetching & Scraping Firm Mention News...")
+    news_context_firm_mentions, firm_mention_links, seen_links_firm_mentions = fetch_firm_mention_news(
+        pef_context["firm_name"],
+        initial_seen_links=seen_links_general
+    )
     
-    # 6. Fetch additional PEF News
-    logging.info("5. Fetching & Scraping PEF News...")
+    # 7. Fetch additional PEF News
+    logging.info("6. Fetching & Scraping PEF News...")
     news_context_pef, pef_links, _ = fetch_news(
         mode=mode, 
         is_us_holiday=is_us_holiday_prev_close, 
         is_kr_holiday=is_kr_holiday, 
         target="pef",
-        initial_seen_links=seen_links_general
+        initial_seen_links=seen_links_firm_mentions
     )
+    combined_pef_context = news_context_firm_mentions + news_context_pef
+    pef_source_links = dedupe_links(firm_mention_links + pef_links)
     
-    # 7. Generate PEF Briefing
-    logging.info("6. Generating PEF Briefing using Gemini...")
+    # 8. Generate PEF Briefing
+    logging.info("7. Generating PEF Briefing using Gemini...")
     briefing_pef = generate_briefing(
         market_data, 
-        news_context_pef, 
+        combined_pef_context,
         mode=mode,
         is_us_holiday=is_us_holiday_prev_close,
         is_kr_holiday=is_kr_holiday,
@@ -1119,22 +1273,25 @@ def main():
         briefing_date=today
     )
     
-    pef_links_message = build_news_links_message(pef_links)
+    pef_links_message = build_news_links_message(
+        pef_source_links,
+        title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크"
+    )
     
-    # 8. Print PEF Briefing to Console
+    # 9. Print PEF Briefing to Console
     logging.info("\n" + "="*50)
     logging.info(briefing_pef) 
     logging.info("="*50 + "\n")
     
-    # 9. Send PEF Briefing to Telegram
+    # 10. Send PEF Briefing to Telegram
     if "test" in args or "--test" in args:
-         logging.info("7. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("8. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
-        logging.info("7. Sending PEF Briefing to Telegram...")
+        logging.info("8. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
             pef_sent = send_telegram_message(briefing_pef, target="pef")
             if pef_sent and pef_links_message:
-                logging.info("8. Sending PEF source links to Telegram...")
+                logging.info("9. Sending PEF source links to Telegram...")
                 send_telegram_message(pef_links_message, target="pef")
         else:
             logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")

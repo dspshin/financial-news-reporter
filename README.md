@@ -11,7 +11,8 @@
     - **토요일**: 미 증시 마감 기준 글로벌 증시 주간 요약
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
 - **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
-- **IT PMI 관점 보강**: PEF 브리핑에서 Day-1, TSA, ERP/데이터 통합, 사이버보안, 100일 실행계획 등 IT PMI 시사점을 함께 정리합니다.
+- **Baikal 언급 뉴스 레이더**: `PEF_FIRM_NAME`으로 지정한 운용사명이 직접 언급된 최신 뉴스를 별도 수집하고, 기사에 등장한 회사/기관/인물을 요약합니다.
+- **IT PMI 관점 보강**: PEF 브리핑에서 Day-1/TSA, 보안/데이터, 100일 IT 실행 항목을 간단한 체크포인트로 정리합니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **휴장일 자동 감지**:
     - **한국 증시 휴장일**: "오늘의 증시 전망" 대신 글로벌 시황 위주의 리포트 작성
@@ -52,6 +53,9 @@ TELEGRAM_PEF_CHANNEL_ID=your_pef_channel_id_here
 # PEF 브리핑 개인화 (선택 사항)
 PEF_FIRM_NAME=Baikal Investment
 PEF_PMI_ROLE=IT PMI Lead
+PEF_FIRM_NEWS_LOOKBACK_DAYS=30
+# 쉼표로 구분해 회사명 검색어를 직접 지정할 수 있음
+PEF_FIRM_NEWS_QUERIES=바이칼인베스트먼트,바이칼 인베스트먼트,Baikal Investment
 ```
 
 ## 📖 사용 방법 (Usage)
