@@ -6,6 +6,7 @@ import feedparser
 import google.generativeai as genai
 import holidays
 import html
+import json
 import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -132,6 +133,9 @@ FIRM_SHORT_NAME_CONTEXT_KEYWORDS = [
 TELEGRAM_MESSAGE_LIMIT = 3900
 PEF_MIN_ACCEPTED_ARTICLES = 3
 PEF_FIRM_MENTION_MAX_ARTICLES = 5
+DEFAULT_NEWS_HISTORY_FILE = ".news_history.json"
+DEFAULT_NEWS_HISTORY_RETENTION_DAYS = 30
+DEFAULT_NEWS_HISTORY_TITLE_MATCH_DAYS = 7
 
 
 # --- Logging Configuration ---
@@ -291,6 +295,13 @@ def parse_int_env(name, default):
         return default
 
 
+def parse_bool_env(name, default=True):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
 def build_firm_news_queries(firm_name):
     firm_name = firm_name or ""
     env_queries = os.getenv("PEF_FIRM_NEWS_QUERIES")
@@ -337,6 +348,164 @@ def match_firm_mention(searchable_text, match_terms, firm_name):
 def normalize_title_for_dedupe(title):
     normalized = re.sub(r"\s+", " ", title or "").strip().lower()
     return re.sub(r"\s+-\s+[^-]+$", "", normalized)
+
+
+def get_news_history_path():
+    return os.getenv("NEWS_HISTORY_FILE", DEFAULT_NEWS_HISTORY_FILE)
+
+
+def parse_history_date(value):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_history_articles(raw_data):
+    if isinstance(raw_data, dict):
+        articles = raw_data.get("articles", [])
+    elif isinstance(raw_data, list):
+        articles = raw_data
+    else:
+        articles = []
+
+    normalized = []
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        link = article.get("link")
+        title = article.get("title", "")
+        title_key = article.get("title_key") or normalize_title_for_dedupe(title)
+        if not link and not title_key:
+            continue
+        normalized.append({
+            "link": link,
+            "title": title,
+            "title_key": title_key,
+            "target": article.get("target", "unknown"),
+            "collected_at": article.get("collected_at"),
+        })
+    return normalized
+
+
+def build_news_history_state(articles, path, title_key_cutoff_date=None, title_match_enabled=True):
+    links = {article["link"] for article in articles if article.get("link")}
+    title_keys = set()
+    if title_match_enabled:
+        for article in articles:
+            title_key = article.get("title_key")
+            if not title_key:
+                continue
+            collected_date = parse_history_date(article.get("collected_at"))
+            if title_key_cutoff_date and collected_date and collected_date < title_key_cutoff_date:
+                continue
+            title_keys.add(title_key)
+    return {
+        "path": path,
+        "articles": articles,
+        "links": links,
+        "title_keys": title_keys,
+        "title_match_enabled": title_match_enabled,
+    }
+
+
+def load_news_history(today=None):
+    path = get_news_history_path()
+    reference_date = today or datetime.now().date()
+    retention_days = max(1, parse_int_env("NEWS_HISTORY_RETENTION_DAYS", DEFAULT_NEWS_HISTORY_RETENTION_DAYS))
+    title_match_days = max(
+        0,
+        parse_int_env("NEWS_HISTORY_TITLE_MATCH_DAYS", DEFAULT_NEWS_HISTORY_TITLE_MATCH_DAYS)
+    )
+    cutoff_date = reference_date - timedelta(days=retention_days)
+    title_match_enabled = title_match_days > 0
+    title_key_cutoff_date = reference_date - timedelta(days=title_match_days) if title_match_enabled else None
+
+    try:
+        with open(path, "r", encoding="utf-8") as history_file:
+            raw_data = json.load(history_file)
+    except FileNotFoundError:
+        logging.info(f"   [News History] No history file found. Starting fresh: {path}")
+        return build_news_history_state([], path, title_match_enabled=title_match_enabled)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning(f"   [News History] Could not load {path}: {e}. Starting fresh.")
+        return build_news_history_state([], path, title_match_enabled=title_match_enabled)
+
+    articles = []
+    for article in normalize_history_articles(raw_data):
+        collected_date = parse_history_date(article.get("collected_at"))
+        if collected_date and collected_date < cutoff_date:
+            continue
+        articles.append(article)
+
+    logging.info(
+        f"   [News History] Loaded {len(articles)} recently collected articles "
+        f"(retention={retention_days}d, title_match={title_match_days}d)."
+    )
+    return build_news_history_state(
+        articles,
+        path,
+        title_key_cutoff_date=title_key_cutoff_date,
+        title_match_enabled=title_match_enabled
+    )
+
+
+def save_news_history(history):
+    if not history:
+        return
+
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "articles": history.get("articles", []),
+    }
+    path = history.get("path") or get_news_history_path()
+    try:
+        with open(path, "w", encoding="utf-8") as history_file:
+            json.dump(payload, history_file, ensure_ascii=False, indent=2)
+        logging.info(f"   [News History] Saved {len(payload['articles'])} articles to {path}.")
+    except OSError as e:
+        logging.error(f"   [News History] Failed to save {path}: {e}")
+
+
+def should_skip_seen_article(entry, history, seen_title_keys=None):
+    if not history:
+        title_key = normalize_title_for_dedupe(entry.title)
+        if seen_title_keys is not None and title_key in seen_title_keys:
+            return True, "title_in_run", title_key
+        return False, None, title_key
+
+    title_key = normalize_title_for_dedupe(entry.title)
+    if entry.link in history.get("links", set()):
+        return True, "link", title_key
+    if title_key and title_key in history.get("title_keys", set()):
+        return True, "title", title_key
+    if seen_title_keys is not None and title_key in seen_title_keys:
+        return True, "title_in_run", title_key
+    return False, None, title_key
+
+
+def mark_article_collected(history, entry, target, collected_date=None):
+    if not history:
+        return
+
+    title_key = normalize_title_for_dedupe(entry.title)
+    link = entry.link
+    if link in history.get("links", set()) or title_key in history.get("title_keys", set()):
+        return
+
+    collected_at = (collected_date or datetime.now().date()).isoformat()
+    history["articles"].append({
+        "link": link,
+        "title": entry.title,
+        "title_key": title_key,
+        "target": target,
+        "collected_at": collected_at,
+    })
+    if link:
+        history["links"].add(link)
+    if title_key and history.get("title_match_enabled", True):
+        history["title_keys"].add(title_key)
 
 
 def split_message(message, limit=TELEGRAM_MESSAGE_LIMIT):
@@ -523,7 +692,15 @@ def scrape_article_content(url):
         logging.error(f"   Failed to scrape {url}: {e}")
         return None
 
-def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target="general", initial_seen_links=None):
+def fetch_news(
+    mode="weekday",
+    is_us_holiday=False,
+    is_kr_holiday=False,
+    target="general",
+    initial_seen_links=None,
+    news_history=None,
+    collected_date=None,
+):
     """
     Fetches top economic news using Google News RSS with specific search queries
     based on the mode (weekday/saturday/sunday) and holiday status.
@@ -590,6 +767,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
     
     combined_news_context = ""
     seen_links = set(initial_seen_links) if initial_seen_links else set()
+    seen_title_keys = set()
     collected_links = [] # List to store (title, link)
     rejected_pef_candidates = []
     
@@ -607,7 +785,21 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
             for entry in feed.entries[:3]:
                 if entry.link in seen_links:
                     continue
+                skip_article, skip_reason, title_key = should_skip_seen_article(
+                    entry,
+                    news_history,
+                    seen_title_keys=seen_title_keys
+                )
+                if skip_article:
+                    logging.info(
+                        f"   [News History] SKIP already collected ({skip_reason}): {entry.title}"
+                    )
+                    seen_links.add(entry.link)
+                    seen_title_keys.add(title_key)
+                    continue
+
                 seen_links.add(entry.link)
+                seen_title_keys.add(title_key)
                 
                 logging.info(f"   - Processing: {entry.title}")
                 content = scrape_article_content(entry.link)
@@ -637,6 +829,7 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
                     pef_meta=pef_meta if target == "pef" else None
                 )
                 collected_links.append((entry.title, entry.link))
+                mark_article_collected(news_history, entry, target, collected_date=collected_date)
                     
         except Exception as e:
             logging.error(f"   Error fetching RSS for {query}: {e}")
@@ -675,12 +868,18 @@ def fetch_news(mode="weekday", is_us_holiday=False, is_kr_holiday=False, target=
                 pef_meta=pef_meta
             )
             collected_links.append((candidate["entry"].title, candidate["entry"].link))
+            mark_article_collected(
+                news_history,
+                candidate["entry"],
+                target,
+                collected_date=collected_date
+            )
             needed -= 1
 
     return combined_news_context, collected_links, seen_links
 
 
-def fetch_firm_mention_news(firm_name, initial_seen_links=None):
+def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=None, collected_date=None):
     """
     Fetches recent news that directly mentions the GP name.
     This runs separately from the PEF filter so firm mentions are not lost.
@@ -723,6 +922,18 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None):
                 title_key = normalize_title_for_dedupe(entry.title)
                 if entry.link in seen_links or title_key in seen_titles:
                     continue
+                skip_article, skip_reason, title_key = should_skip_seen_article(
+                    entry,
+                    news_history,
+                    seen_title_keys=seen_titles
+                )
+                if skip_article:
+                    logging.info(
+                        f"      [News History] SKIP already collected ({skip_reason}): {entry.title}"
+                    )
+                    seen_links.add(entry.link)
+                    seen_titles.add(title_key)
+                    continue
 
                 logging.info(f"   - Firm mention candidate: {entry.title}")
                 content = scrape_article_content(entry.link)
@@ -746,6 +957,12 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None):
                 firm_context += f"--- FIRM MENTION ARTICLE END ---\n"
                 combined_news_context += firm_context
                 collected_links.append((entry.title, entry.link))
+                mark_article_collected(
+                    news_history,
+                    entry,
+                    "firm_mention",
+                    collected_date=collected_date
+                )
 
         except Exception as e:
             logging.error(f"   Error fetching firm mention RSS for {query}: {e}")
@@ -763,17 +980,62 @@ def dedupe_links(links):
         deduped.append((title, link))
     return deduped
 
+
+def build_market_snapshot(market_data, max_items=None):
+    if not market_data:
+        return "- 시장 데이터 없음"
+
+    lines = []
+    for name, data in market_data.items():
+        if max_items and len(lines) >= max_items:
+            break
+        if data:
+            emoji = "🔺" if data['change'] > 0 else "🔻" if data['change'] < 0 else "➖"
+            lines.append(f"- {name}: {data['price']:,.2f} ({emoji} {data['pct_change']:.2f}%)")
+        else:
+            lines.append(f"- {name}: Data Unavailable")
+    return "\n".join(lines) if lines else "- 시장 데이터 없음"
+
+
+def build_no_new_articles_briefing(market_data, target="general", briefing_date=None, kr_holiday_text=""):
+    reference_date = briefing_date or datetime.now().date()
+    today = reference_date.strftime("%m/%d(%a)")
+    market_snapshot = build_market_snapshot(market_data, max_items=8)
+
+    if target == "pef":
+        pef_context = get_pef_persona_config()
+        firm_name = pef_context["firm_name"]
+        pmi_role = pef_context["pmi_role"]
+        return f"""<b>👔 {today} {firm_name} GP & {pmi_role} 인사이트 브리핑{kr_holiday_text}</b>
+
+<b>📭 신규 채택 뉴스 없음</b>
+- 중복 제거 및 PEF 필터 적용 결과, 오늘 새로 브리핑할 PEF/{firm_name} 관련 기사는 없습니다.
+- 기존 기사 재사용 없이 시장 데이터와 내부 점검 액션만 간단히 확인합니다.
+
+<b>📊 시장 데이터 체크</b>
+{market_snapshot}
+
+<b>🎯 오늘/이번 주 핵심 액션</b>
+- <b>GP Action</b>: 진행 중인 딜/포트폴리오의 기존 업데이트와 미확인 데이터만 재점검.
+- <b>{pmi_role} Action</b>: 신규 기사 기반 이슈는 없으므로, 기존 IT DD/PMI 체크리스트의 미완료 항목만 팔로업."""
+
+    return f"""<b>📊 {today} 시장 브리핑{kr_holiday_text}</b>
+
+<b>📭 신규 채택 뉴스 없음</b>
+- 중복 제거 결과, 오늘 새로 브리핑할 뉴스 기사는 없습니다.
+- 기존 기사 재사용 없이 시장 데이터만 간단히 확인합니다.
+
+<b>📊 시장 데이터 체크</b>
+{market_snapshot}
+
+<b>🎯 대응</b>
+- 신규 뉴스 기반 판단은 보류하고, 주요 지수/환율 변동과 기존 체크포인트 중심으로 모니터링합니다."""
+
 # --- Summarizer Module ---
 def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general", briefing_date=None):
     """
     Generates a daily economic briefing using Gemini 2.0 Flash with a structured analyst persona.
     """
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return "Error: GEMINI_API_KEY not found in environment variables."
-        
-    genai.configure(api_key=api_key)
-    
     # Construct the prompt
     reference_date = briefing_date or datetime.now().date()
     today = reference_date.strftime("%m/%d(%a)")
@@ -792,6 +1054,21 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     # Helper to clean up holiday text
     us_holiday_text = f" (미국 휴장: {holiday_name_us})" if is_us_holiday else ""
     kr_holiday_text = f" (국내 휴장: {holiday_name_kr})" if is_kr_holiday else ""
+
+    if not (news_context or "").strip():
+        logging.info(f"   [No News] No new articles for target='{target}'. Using fallback briefing.")
+        return build_no_new_articles_briefing(
+            market_data,
+            target=target,
+            briefing_date=reference_date,
+            kr_holiday_text=kr_holiday_text
+        )
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return "Error: GEMINI_API_KEY not found in environment variables."
+
+    genai.configure(api_key=api_key)
 
     # Define Prompt Template based on Mode
     if mode == "saturday":
@@ -1163,6 +1440,8 @@ def main():
     # Usage: python main.py --mode saturday
     # Usage: python main.py --date 2023-12-25
     args = sys.argv[1:] if len(sys.argv) > 1 else []
+    test_mode = "test" in args or "--test" in args
+    news_history_enabled = parse_bool_env("NEWS_HISTORY_ENABLED", True) and "--no-news-history" not in args
     
     # Determine 'today' for holiday checking
     today = datetime.now().date()
@@ -1200,13 +1479,27 @@ def main():
         logging.info(f"   [Holiday] KR Market Closed: {holiday_name_kr}")
     if is_us_holiday_prev_close and mode == "weekday":
         logging.info(f"   [Holiday] US Market (Prev Close) Closed: {holiday_name_us}")
+
+    news_history = load_news_history(today=today) if news_history_enabled else None
+    if not news_history_enabled:
+        logging.info("   [News History] Disabled for this run.")
+    save_history_after_run = bool(news_history) and not test_mode
+    if news_history and test_mode:
+        logging.info("   [News History] Test mode: history will be read but not saved.")
     
     # 1. Fetch Data
     logging.info("1. Fetching Market Data...")
     market_data = fetch_market_data()
     
     # Pass US holiday status for news fetching logic
-    news_context_general, _, seen_links_general = fetch_news(mode=mode, is_us_holiday=is_us_holiday_prev_close, is_kr_holiday=is_kr_holiday, target="general")
+    news_context_general, _, seen_links_general = fetch_news(
+        mode=mode,
+        is_us_holiday=is_us_holiday_prev_close,
+        is_kr_holiday=is_kr_holiday,
+        target="general",
+        news_history=news_history,
+        collected_date=today
+    )
     
     # 3. Generate Briefing (Pass Mode & Holiday Context)
     logging.info("3. Generating General Briefing using Gemini...")
@@ -1230,7 +1523,7 @@ def main():
     
     # 5. Send to Telegram
     # Skip if 'test' in args
-    if "test" in args or "--test" in args:
+    if test_mode:
          logging.info("4. Sending General Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
         logging.info("4. Sending General Briefing to Telegram...")
@@ -1244,7 +1537,9 @@ def main():
     logging.info("5. Fetching & Scraping Firm Mention News...")
     news_context_firm_mentions, firm_mention_links, seen_links_firm_mentions = fetch_firm_mention_news(
         pef_context["firm_name"],
-        initial_seen_links=seen_links_general
+        initial_seen_links=seen_links_general,
+        news_history=news_history,
+        collected_date=today
     )
     
     # 7. Fetch additional PEF News
@@ -1254,7 +1549,9 @@ def main():
         is_us_holiday=is_us_holiday_prev_close, 
         is_kr_holiday=is_kr_holiday, 
         target="pef",
-        initial_seen_links=seen_links_firm_mentions
+        initial_seen_links=seen_links_firm_mentions,
+        news_history=news_history,
+        collected_date=today
     )
     combined_pef_context = news_context_firm_mentions + news_context_pef
     pef_source_links = dedupe_links(firm_mention_links + pef_links)
@@ -1284,7 +1581,7 @@ def main():
     logging.info("="*50 + "\n")
     
     # 10. Send PEF Briefing to Telegram
-    if "test" in args or "--test" in args:
+    if test_mode:
          logging.info("8. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
         logging.info("8. Sending PEF Briefing to Telegram...")
@@ -1295,6 +1592,9 @@ def main():
                 send_telegram_message(pef_links_message, target="pef")
         else:
             logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")
+
+    if save_history_after_run:
+        save_news_history(news_history)
 
 if __name__ == "__main__":
     main()
