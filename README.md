@@ -28,6 +28,9 @@
 - Google Gemini API Key
 - Telegram Bot Token & Channel ID
 
+Python 3.9에서는 해당 버전을 지원하는 `google-genai 1.47.0`이 설치되고,
+Python 3.10 이상에서는 `google-genai 2.13.0`이 설치됩니다.
+
 ### 2. 프로젝트 클론 및 패키지 설치
 ```bash
 git clone <repository-url>
