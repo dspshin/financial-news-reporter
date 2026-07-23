@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import time
 import logging
+import xml.etree.ElementTree as ET
 
 # --- Holiday Check Module ---
 def check_holidays(today=None):
@@ -68,8 +69,7 @@ PEF_STRONG_SIGNAL_KEYWORDS = [
     "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "spin-off",
     "ipo", "상장", "엑시트", "회수", "리파이낸싱", "인수금융", "대주단",
     "드라이파우더", "private credit", "사모대출", "밸류업", "구조조정",
-    "turnaround", "운영효율화", "pmi", "tsa", "day-1", "day 1",
-    "pef", "지분 매각", "경영권 매각"
+    "turnaround", "운영효율화", "pef", "지분 매각", "경영권 매각"
 ]
 
 PEF_MEDIUM_SIGNAL_KEYWORDS = [
@@ -93,11 +93,6 @@ PEF_CATEGORY_KEYWORDS = {
         "밸류업", "구조조정", "턴어라운드", "turnaround", "운영효율화",
         "원가절감", "현금흐름", "거버넌스", "포트폴리오", "시너지"
     ],
-    "it_pmi": [
-        "전산", "전산 통합", "it 통합", "it 인프라", "erp", "sap", "crm",
-        "클라우드", "데이터센터", "사이버", "보안", "cyber", "데이터 거버넌스",
-        "시스템 통합", "애플리케이션", "application", "tsa", "day-1", "day 1", "분리"
-    ],
     "macro_regulation": [
         "금리", "관세", "규제", "정책", "환율", "공정위", "금감원", "반독점",
         "유가", "원자재", "거시", "매크로"
@@ -111,7 +106,6 @@ PEF_CATEGORY_LABELS = {
     "deal_sourcing": "Deal Sourcing",
     "financing_exit": "Financing & Exit",
     "portfolio_ops": "Portfolio Ops",
-    "it_pmi": "IT PMI",
     "macro_regulation": "Macro & Regulation",
     "governance_legal": "Governance & Legal",
 }
@@ -140,6 +134,21 @@ DEFAULT_GEMINI_MODELS = (
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
+)
+
+DART_DEBT_LIST_URL = "https://dart.fss.or.kr/dsac005/search.ax"
+DART_REPORT_URL = "https://dart.fss.or.kr/dsaf001/main.do"
+DART_VIEWER_URL = "https://dart.fss.or.kr/report/viewer.do"
+DART_DEBT_BOARD_URL = "https://dart.fss.or.kr/dsac005/main.do"
+KOFIA_BOND_API_URL = "https://www.kofiabond.or.kr/proframeWeb/XMLSERVICES/"
+KOFIA_BOND_CENTER_URL = "https://www.kofiabond.or.kr/"
+BOND_CATEGORY_ORDER = ("공사채", "은행채", "여전채", "회사채")
+BOND_EXCLUDED_SECURITY_KEYWORDS = (
+    "파생", "주가연계", "전환사채", "교환사채", "신주인수권", "조건부자본",
+)
+KOFIA_EXCLUDED_BOND_KEYWORDS = (
+    "(els)", "(elb)", "(dls)", "(dlb)", "사모", "전환사채", "교환사채",
+    "신주인수권부사채",
 )
 
 PEF_DIRECT_KEYWORDS = [
@@ -359,7 +368,6 @@ def append_article_context(existing_context, entry, content, target="general", p
 def get_pef_persona_config():
     return {
         "firm_name": os.getenv("PEF_FIRM_NAME", "Baikal Investment"),
-        "pmi_role": os.getenv("PEF_PMI_ROLE", "IT PMI Lead"),
     }
 
 
@@ -871,6 +879,819 @@ def build_news_links_message(links, title="🔗 금일 수집된 주요 뉴스 �
         lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
     return "\n".join(lines)
 
+
+# --- Bond Issuance Market Module ---
+def normalize_whitespace(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def parse_disclosure_date(value):
+    if not value:
+        return None
+
+    match = re.search(
+        r"(20\d{2})\s*(?:[.\-/년])\s*(\d{1,2})\s*(?:[.\-/월])\s*(\d{1,2})",
+        value,
+    )
+    if not match:
+        return None
+
+    try:
+        return datetime(
+            int(match.group(1)),
+            int(match.group(2)),
+            int(match.group(3)),
+        ).date()
+    except ValueError:
+        return None
+
+
+def parse_dart_debt_list(list_html):
+    soup = BeautifulSoup(list_html, "html.parser")
+    disclosures = []
+
+    for row in soup.select("table tbody tr"):
+        cells = row.find_all("td", recursive=False)
+        if len(cells) < 6:
+            continue
+
+        report_link = cells[2].find("a", href=re.compile(r"rcpNo="))
+        if not report_link:
+            continue
+
+        report_name = normalize_whitespace(cells[2].get_text(" ", strip=True))
+        security_type = normalize_whitespace(
+            cells[3].get("title") or cells[3].get_text(" ", strip=True)
+        )
+        lowered_security_type = security_type.lower()
+        if "증권신고서(채무증권)" not in report_name:
+            continue
+        # Demand forecasting is already complete once final issue terms are filed.
+        # Same-day issuance is covered separately by the KOFIA source.
+        if "발행조건확정" in report_name:
+            continue
+        if "사채" not in security_type:
+            continue
+        if any(keyword in lowered_security_type for keyword in BOND_EXCLUDED_SECURITY_KEYWORDS):
+            continue
+
+        rcp_match = re.search(r"rcpNo=(\d+)", report_link.get("href", ""))
+        if not rcp_match:
+            continue
+
+        issuer_link = cells[1].find("a", href=re.compile(r"openCorpInfoNew"))
+        issuer = normalize_whitespace(
+            issuer_link.get_text(" ", strip=True)
+            if issuer_link
+            else cells[1].get_text(" ", strip=True)
+        )
+        payment_date = parse_disclosure_date(cells[4].get_text(" ", strip=True))
+        receipt_date = parse_disclosure_date(cells[5].get_text(" ", strip=True))
+        if not issuer or not payment_date:
+            continue
+
+        rcp_no = rcp_match.group(1)
+        disclosures.append({
+            "issuer": issuer,
+            "report_name": report_name,
+            "security_type": security_type,
+            "payment_date": payment_date,
+            "receipt_date": receipt_date,
+            "rcp_no": rcp_no,
+            "report_url": f"{DART_REPORT_URL}?rcpNo={rcp_no}",
+        })
+
+    return disclosures
+
+
+def parse_dart_toc_sections(report_html):
+    sections = []
+    blocks = re.split(r"var\s+node\d+\s*=\s*\{\s*\};", report_html or "")
+
+    for block in blocks:
+        properties = {}
+        for match in re.finditer(
+            r"node\d+\['([^']+)'\]\s*=\s*([\"'])(.*?)\2\s*;",
+            block,
+            flags=re.DOTALL,
+        ):
+            properties[match.group(1)] = html.unescape(match.group(3))
+
+        required = {"text", "rcpNo", "dcmNo", "eleId", "offset", "length", "dtd"}
+        if required.issubset(properties):
+            sections.append(properties)
+
+    return sections
+
+
+def find_dart_toc_section(sections, section_name):
+    target = re.sub(r"[\s\d.ⅠⅡⅢIVX-]+", "", section_name)
+    for section in sections:
+        normalized = re.sub(r"[\s\d.ⅠⅡⅢIVX-]+", "", section.get("text", ""))
+        if target and target in normalized:
+            return section
+    return None
+
+
+def extract_dart_won_amounts(overview_soup, label):
+    amounts = []
+    compact_label = re.sub(r"\s+", "", label)
+
+    for row in overview_soup.find_all("tr"):
+        cells = row.find_all(["th", "td"], recursive=False)
+        if len(cells) < 2:
+            continue
+        row_label = re.sub(r"\s+", "", cells[0].get_text(" ", strip=True))
+        if row_label != compact_label:
+            continue
+        amount_match = re.search(
+            r"(?<!\d)(\d{1,3}(?:,\d{3}){2,}|\d{9,})(?!\d)",
+            " ".join(cell.get_text(" ", strip=True) for cell in cells[1:]),
+        )
+        if amount_match:
+            amounts.append(int(amount_match.group(1).replace(",", "")))
+
+    return amounts
+
+
+def extract_dart_demand_schedule(text, receipt_date=None, payment_date=None):
+    date_pattern = re.compile(
+        r"(20\d{2})년\s*(\d{1,2})월\s*(\d{1,2})일"
+    )
+    schedules = []
+
+    for match in date_pattern.finditer(text):
+        context_start = max(0, match.start() - 100)
+        context_end = min(len(text), match.end() + 180)
+        context = text[context_start:context_end]
+        if "수요예측" not in context:
+            continue
+
+        try:
+            schedule_date = datetime(
+                int(match.group(1)),
+                int(match.group(2)),
+                int(match.group(3)),
+            ).date()
+        except ValueError:
+            continue
+
+        if receipt_date and schedule_date < receipt_date:
+            continue
+        if payment_date and schedule_date > payment_date:
+            continue
+
+        time_context = text[match.end():min(len(text), match.end() + 70)]
+        time_match = re.search(
+            r"(\d{1,2})(?:시|:\d{2})\s*(?:에서|부터|~|～|-)\s*"
+            r"(\d{1,2})(?:시|:\d{2})",
+            time_context,
+        )
+        start_time = f"{int(time_match.group(1)):02d}:00" if time_match else None
+        end_time = f"{int(time_match.group(2)):02d}:00" if time_match else None
+        schedules.append((schedule_date, start_time, end_time))
+
+    if not schedules:
+        return None, None, None
+
+    schedules.sort(key=lambda item: item[0])
+    return schedules[0]
+
+
+def format_basis_points(value):
+    basis_points = value * 100
+    if abs(basis_points - round(basis_points)) < 0.0001:
+        return str(int(round(basis_points)))
+    return f"{basis_points:.1f}".rstrip("0").rstrip(".")
+
+
+def extract_dart_rate_band(text):
+    match = re.search(
+        r"(-\s*\d+(?:\.\d+)?\s*%p\.?)\s*(?:~|～|내지)\s*"
+        r"(\+\s*\d+(?:\.\d+)?\s*%p\.?)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+
+    low_match = re.search(r"-\s*(\d+(?:\.\d+)?)", match.group(1))
+    high_match = re.search(r"\+\s*(\d+(?:\.\d+)?)", match.group(2))
+    if not low_match or not high_match:
+        return None
+
+    context = text[max(0, match.start() - 500):match.start()]
+    benchmark = None
+    if "개별민평" in context:
+        benchmark = "개별민평"
+    elif "등급민평" in context:
+        rating_matches = re.findall(r"([A-Z]{1,4}[+-]?)등급", context)
+        instrument_matches = re.findall(r"(은행채|회사채)", context)
+        term_matches = re.findall(r"(\d+(?:\.\d+)?)년(?:\s*만기)?", context)
+        benchmark_parts = []
+        if rating_matches:
+            benchmark_parts.append(rating_matches[-1])
+        if instrument_matches:
+            benchmark_parts.append(instrument_matches[-1])
+        if term_matches:
+            benchmark_parts.append(f"{term_matches[-1]}년")
+        benchmark_parts.append("등급민평")
+        benchmark = " ".join(benchmark_parts)
+
+    low = format_basis_points(float(low_match.group(1)))
+    high = format_basis_points(float(high_match.group(1)))
+    return f"{benchmark + ' ' if benchmark else ''}-{low}~+{high}bp"
+
+
+def extract_dart_bond_terms(overview_soup, payment_date):
+    maturity_dates = []
+    for row in overview_soup.find_all("tr"):
+        cells = row.find_all(["th", "td"], recursive=False)
+        if len(cells) < 2:
+            continue
+        row_label = re.sub(r"\s+", "", cells[0].get_text(" ", strip=True))
+        if "상환기한" not in row_label:
+            continue
+        maturity_date = parse_disclosure_date(
+            " ".join(cell.get_text(" ", strip=True) for cell in cells[1:])
+        )
+        if maturity_date:
+            maturity_dates.append(maturity_date)
+
+    terms = set()
+    for maturity_date in maturity_dates:
+        months = (
+            (maturity_date.year - payment_date.year) * 12
+            + maturity_date.month
+            - payment_date.month
+        )
+        if months <= 0:
+            continue
+        if months % 12 == 0:
+            terms.add(f"{months // 12}년")
+        else:
+            terms.add(f"{months / 12:.1f}년")
+
+    return "/".join(sorted(terms, key=lambda value: float(value[:-1])))
+
+
+def parse_dart_bond_event(disclosure, overview_html, pricing_html=None):
+    overview_soup = BeautifulSoup(overview_html, "html.parser")
+    overview_text = normalize_whitespace(overview_soup.get_text(" ", strip=True))
+    pricing_text = ""
+    if pricing_html:
+        pricing_soup = BeautifulSoup(pricing_html, "html.parser")
+        pricing_text = normalize_whitespace(pricing_soup.get_text(" ", strip=True))
+
+    demand_date, start_time, end_time = extract_dart_demand_schedule(
+        overview_text,
+        receipt_date=disclosure.get("receipt_date"),
+        payment_date=disclosure.get("payment_date"),
+    )
+    if not demand_date:
+        return None
+
+    won_amounts = extract_dart_won_amounts(overview_soup, "전자등록총액")
+    if not won_amounts:
+        won_amounts = extract_dart_won_amounts(overview_soup, "모집 또는 매출총액")
+    amount_eok = sum(won_amounts) / 100_000_000 if won_amounts else None
+
+    max_amount_eok = None
+    max_match = re.search(
+        r"합계\s*금?.{0,80}?\(\s*[\\₩]?\s*([\d,]{10,})\s*\)\s*이하",
+        overview_text,
+    )
+    if max_match:
+        max_amount_eok = int(max_match.group(1).replace(",", "")) / 100_000_000
+        if amount_eok and max_amount_eok <= amount_eok:
+            max_amount_eok = None
+
+    rating_matches = re.findall(
+        r"평가결과등급\s+([A-Z]{1,4}[+-]?)(?:\([^)]*\))?",
+        overview_text,
+    )
+    ratings = list(dict.fromkeys(rating_matches))
+    rate_band = extract_dart_rate_band(overview_text)
+    if not rate_band and pricing_text:
+        rate_band = extract_dart_rate_band(pricing_text)
+
+    return {
+        **disclosure,
+        "demand_date": demand_date,
+        "start_time": start_time,
+        "end_time": end_time,
+        "amount_eok": amount_eok,
+        "max_amount_eok": max_amount_eok,
+        "rating": "/".join(ratings),
+        "term": extract_dart_bond_terms(
+            overview_soup,
+            disclosure["payment_date"],
+        ),
+        "rate_band": rate_band,
+    }
+
+
+def get_dart_viewer_response(requester, section, timeout):
+    response = requester.get(
+        DART_VIEWER_URL,
+        params={
+            "rcpNo": section["rcpNo"],
+            "dcmNo": section["dcmNo"],
+            "eleId": section["eleId"],
+            "offset": section["offset"],
+            "length": section["length"],
+            "dtd": section["dtd"],
+        },
+        headers=HEADERS,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    return response.text
+
+
+def fetch_dart_debt_disclosures(reference_date=None, requester=None):
+    requester = requester or requests
+    reference_date = reference_date or datetime.now().date()
+    timeout = max(3, parse_int_env("BOND_SOURCE_TIMEOUT_SECONDS", 15))
+    lookahead_days = max(1, parse_int_env("BOND_DART_LOOKAHEAD_DAYS", 14))
+    max_candidates = max(1, parse_int_env("BOND_DART_MAX_CANDIDATES", 16))
+    end_date = reference_date + timedelta(days=lookahead_days)
+    result = {
+        "source": "dart",
+        "status": "empty",
+        "items": [],
+        "errors": [],
+        "candidates": 0,
+    }
+
+    all_disclosures = []
+    total_pages = 1
+    for page in range(1, 6):
+        if page > total_pages:
+            break
+        try:
+            response = requester.post(
+                DART_DEBT_LIST_URL,
+                data={
+                    "currentPage": page,
+                    "maxResults": 100,
+                    "maxLinks": 10,
+                    "sort": "",
+                    "series": "",
+                    "textCrpCik": "",
+                    "pageGrouping": "B",
+                    "autoSearchCorp": "Y",
+                    "textCrpNm": "",
+                    "stkKndNm": "all",
+                },
+                headers=HEADERS,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            all_disclosures.extend(parse_dart_debt_list(response.text))
+            if page == 1:
+                page_match = re.search(r"\[\s*1\s*/\s*(\d+)\s*\]", response.text)
+                total_pages = min(int(page_match.group(1)), 5) if page_match else 1
+        except (requests.RequestException, ValueError) as error:
+            result["errors"].append(f"list page {page}: {error}")
+            if page == 1:
+                result["status"] = "error"
+                logging.warning(f"   [Bond Market] DART list fetch failed: {error}")
+                return result
+
+    latest_by_issuance = {}
+    for disclosure in all_disclosures:
+        payment_date = disclosure["payment_date"]
+        if not reference_date <= payment_date <= end_date:
+            continue
+        key = (
+            disclosure["issuer"],
+            disclosure["security_type"],
+            payment_date,
+        )
+        current = latest_by_issuance.get(key)
+        sort_key = (
+            disclosure.get("receipt_date") or reference_date,
+            disclosure["rcp_no"],
+        )
+        current_key = (
+            current.get("receipt_date") or reference_date,
+            current["rcp_no"],
+        ) if current else None
+        if not current or sort_key > current_key:
+            latest_by_issuance[key] = disclosure
+
+    candidates = sorted(
+        latest_by_issuance.values(),
+        key=lambda item: (item["payment_date"], item["issuer"]),
+    )[:max_candidates]
+    result["candidates"] = len(candidates)
+
+    report_failures = 0
+    for disclosure in candidates:
+        try:
+            report_response = requester.get(
+                disclosure["report_url"],
+                headers=HEADERS,
+                timeout=timeout,
+            )
+            report_response.raise_for_status()
+            sections = parse_dart_toc_sections(report_response.text)
+            overview_section = find_dart_toc_section(sections, "공모개요")
+            if not overview_section:
+                raise ValueError("공모개요 section not found")
+
+            overview_html = get_dart_viewer_response(
+                requester,
+                overview_section,
+                timeout,
+            )
+            event = parse_dart_bond_event(disclosure, overview_html)
+
+            if event and not event.get("rate_band"):
+                pricing_section = find_dart_toc_section(sections, "공모가격 결정방법")
+                if pricing_section:
+                    pricing_html = get_dart_viewer_response(
+                        requester,
+                        pricing_section,
+                        timeout,
+                    )
+                    event = parse_dart_bond_event(
+                        disclosure,
+                        overview_html,
+                        pricing_html=pricing_html,
+                    )
+
+            if event and reference_date <= event["demand_date"] <= end_date:
+                result["items"].append(event)
+        except (requests.RequestException, ValueError, KeyError) as error:
+            report_failures += 1
+            result["errors"].append(f"{disclosure['issuer']}: {error}")
+            logging.warning(
+                f"   [Bond Market] DART report parse failed "
+                f"({disclosure['issuer']}): {error}"
+            )
+
+    unique_events = {}
+    for event in result["items"]:
+        key = (event["issuer"], event["demand_date"])
+        current = unique_events.get(key)
+        if not current or event["rcp_no"] > current["rcp_no"]:
+            unique_events[key] = event
+    result["items"] = sorted(
+        unique_events.values(),
+        key=lambda item: (item["demand_date"], item["issuer"]),
+    )
+
+    if result["items"]:
+        result["status"] = "partial" if result["errors"] else "ok"
+    elif candidates and report_failures == len(candidates):
+        result["status"] = "error"
+    elif result["errors"]:
+        result["status"] = "partial"
+    else:
+        result["status"] = "empty"
+
+    return result
+
+
+def build_kofia_issuance_request(reference_date):
+    root = ET.Element("message")
+    header = ET.SubElement(root, "proframeHeader")
+    ET.SubElement(header, "pfmAppName").text = "BIS-KOFIABOND"
+    ET.SubElement(header, "pfmSvcName").text = "BISIssInfoSntcSrchSO"
+    ET.SubElement(header, "pfmFnName").text = "list"
+    ET.SubElement(root, "systemHeader")
+    dto = ET.SubElement(root, "BISComDspDatDTO")
+    ET.SubElement(dto, "val1").text = "ISS"
+    date_value = reference_date.strftime("%Y%m%d")
+    ET.SubElement(dto, "val2").text = date_value
+    ET.SubElement(dto, "val3").text = date_value
+    for index in range(4, 8):
+        ET.SubElement(dto, f"val{index}")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+
+
+def is_plain_public_bond(name, amount_eok):
+    lowered_name = (name or "").lower()
+    if not name or amount_eok <= 0:
+        return False
+    if any(keyword in lowered_name for keyword in KOFIA_EXCLUDED_BOND_KEYWORDS):
+        return False
+    if re.search(r"(?:^|[\s(])(?:cb|bw|eb)(?:[\s)\d-]|$)", lowered_name):
+        return False
+    return True
+
+
+def classify_kofia_bond(name):
+    if any(
+        keyword in name
+        for keyword in (
+            "공사", "공단", "재단", "지방채", "지역개발", "도시철도",
+            "특별시", "광역시",
+        )
+    ):
+        return "공사채"
+    if "은행" in name or "금융채권" in name:
+        return "은행채"
+    if "카드" in name or "캐피탈" in name or "저축은행" in name:
+        return "여전채"
+    return "회사채"
+
+
+def normalize_kofia_issuer(name):
+    special_issuers = {
+        "산업금융채권": "산업은행",
+        "중소기업금융채권": "기업은행",
+        "수출입금융채권": "수출입은행",
+    }
+    for prefix, issuer in special_issuers.items():
+        if name.startswith(prefix):
+            return issuer
+
+    issuer_match = re.match(
+        r"^(.+?(?:금융지주|저축은행|은행|카드|캐피탈|공사|공단|재단))"
+        r"(?=[\s\d(]|$)",
+        name,
+    )
+    if issuer_match:
+        issuer = issuer_match.group(1)
+    else:
+        issuer = re.sub(
+            r"(?<=[A-Za-z가-힣])\d{1,4}(?:[-A-Za-z가-힣().]*)?$",
+            "",
+            name,
+        ).strip()
+
+    if issuer.endswith("채권") and any(
+        keyword in issuer for keyword in ("공사", "공단", "재단")
+    ):
+        issuer = issuer[:-2]
+    return issuer or name
+
+
+def parse_kofia_issuance_response(xml_content):
+    root = ET.fromstring(xml_content)
+    response_detail = normalize_whitespace(root.findtext(".//pfmResponseDtal"))
+    if response_detail:
+        raise ValueError(response_detail)
+
+    records = []
+    for node in root.findall(".//BISComDspDatDTO"):
+        values = {
+            child.tag: normalize_whitespace(child.text)
+            for child in list(node)
+        }
+        name = values.get("val1", "")
+        try:
+            amount_eok = float((values.get("val6") or "0").replace(",", ""))
+        except ValueError:
+            continue
+        if not is_plain_public_bond(name, amount_eok):
+            continue
+
+        issue_date = None
+        try:
+            issue_date = datetime.strptime(values.get("val3", ""), "%Y%m%d").date()
+        except ValueError:
+            pass
+
+        records.append({
+            "name": name,
+            "issuer": normalize_kofia_issuer(name),
+            "category": classify_kofia_bond(name),
+            "issue_date": issue_date,
+            "amount_eok": amount_eok,
+            "maturity_date": values.get("val4"),
+            "coupon": values.get("val9"),
+        })
+
+    return records
+
+
+def aggregate_kofia_issuance(records):
+    aggregated = {category: {} for category in BOND_CATEGORY_ORDER}
+    total_amount_eok = 0.0
+
+    for record in records:
+        category = record["category"]
+        issuer = record["issuer"]
+        amount_eok = record["amount_eok"]
+        aggregated.setdefault(category, {})
+        aggregated[category][issuer] = aggregated[category].get(issuer, 0.0) + amount_eok
+        total_amount_eok += amount_eok
+
+    categories = {}
+    for category in BOND_CATEGORY_ORDER:
+        categories[category] = sorted(
+            (
+                {"issuer": issuer, "amount_eok": amount}
+                for issuer, amount in aggregated.get(category, {}).items()
+            ),
+            key=lambda item: (-item["amount_eok"], item["issuer"]),
+        )
+    return categories, total_amount_eok
+
+
+def fetch_kofia_bond_issuance(reference_date=None, requester=None):
+    requester = requester or requests
+    reference_date = reference_date or datetime.now().date()
+    timeout = max(3, parse_int_env("BOND_SOURCE_TIMEOUT_SECONDS", 15))
+    result = {
+        "source": "kofia",
+        "status": "empty",
+        "items": [],
+        "categories": {category: [] for category in BOND_CATEGORY_ORDER},
+        "total_amount_eok": 0.0,
+        "errors": [],
+    }
+
+    try:
+        response = requester.post(
+            KOFIA_BOND_API_URL,
+            data=build_kofia_issuance_request(reference_date),
+            headers={
+                **HEADERS,
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Origin": "https://www.kofiabond.or.kr",
+                "Referer": KOFIA_BOND_CENTER_URL,
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        records = parse_kofia_issuance_response(response.content)
+        records = [
+            record
+            for record in records
+            if not record["issue_date"] or record["issue_date"] == reference_date
+        ]
+        categories, total_amount_eok = aggregate_kofia_issuance(records)
+        result.update({
+            "items": records,
+            "categories": categories,
+            "total_amount_eok": total_amount_eok,
+            "status": "ok" if records else "empty",
+        })
+    except (requests.RequestException, ET.ParseError, ValueError) as error:
+        result["status"] = "error"
+        result["errors"].append(str(error))
+        logging.warning(f"   [Bond Market] KOFIA issuance fetch failed: {error}")
+
+    return result
+
+
+def fetch_bond_market_data(reference_date=None):
+    reference_date = reference_date or datetime.now().date()
+    if not parse_bool_env("BOND_MARKET_ENABLED", True):
+        return {"enabled": False, "reference_date": reference_date}
+
+    dart_result = fetch_dart_debt_disclosures(reference_date)
+    kofia_result = fetch_kofia_bond_issuance(reference_date)
+    logging.info(
+        f"   [Bond Market] DART={dart_result['status']} "
+        f"({len(dart_result['items'])} demand schedule(s)), "
+        f"KOFIA={kofia_result['status']} "
+        f"({len(kofia_result['items'])} issuance record(s))."
+    )
+    return {
+        "enabled": True,
+        "reference_date": reference_date,
+        "dart": dart_result,
+        "kofia": kofia_result,
+    }
+
+
+def format_eok_amount(amount):
+    if amount is None:
+        return None
+    if abs(amount - round(amount)) < 0.0001:
+        return f"{int(round(amount)):,}억원"
+    return f"{amount:,.1f}억원"
+
+
+def format_dart_bond_event(event, include_date=False):
+    issuer = html.escape(event["issuer"])
+    report_url = html.escape(event["report_url"], quote=True)
+    prefix = f"{event['demand_date'].strftime('%m/%d')} " if include_date else ""
+    descriptors = [
+        value
+        for value in (event.get("rating"), event.get("term"), event.get("security_type"))
+        if value
+    ]
+    details = [", ".join(descriptors)] if descriptors else []
+
+    amount_text = format_eok_amount(event.get("amount_eok"))
+    if amount_text:
+        if event.get("max_amount_eok"):
+            amount_text += f" (최대 {format_eok_amount(event['max_amount_eok'])})"
+        details.append(amount_text)
+
+    if event.get("start_time") and event.get("end_time"):
+        details.append(f"{event['start_time']}~{event['end_time']}")
+    if event.get("rate_band"):
+        details.append(f"밴드 {event['rate_band']}")
+    if event.get("payment_date"):
+        details.append(f"납입 {event['payment_date'].strftime('%m/%d')}")
+
+    return f'- {prefix}<a href="{report_url}">{issuer}</a>: ' + ", ".join(details)
+
+
+def build_bond_market_section(bond_market_data, reference_date=None):
+    if not bond_market_data or not bond_market_data.get("enabled", True):
+        return ""
+
+    reference_date = (
+        reference_date
+        or bond_market_data.get("reference_date")
+        or datetime.now().date()
+    )
+    dart_result = bond_market_data.get("dart") or {
+        "status": "error",
+        "items": [],
+    }
+    kofia_result = bond_market_data.get("kofia") or {
+        "status": "error",
+        "items": [],
+        "categories": {},
+    }
+    lines = [
+        "---",
+        "<b>💳 채권 발행시장 (DART·금투협)</b>",
+        "<b>오늘 수요예측 (DART)</b>",
+    ]
+
+    today_events = [
+        event
+        for event in dart_result.get("items", [])
+        if event.get("demand_date") == reference_date
+    ]
+    future_events = [
+        event
+        for event in dart_result.get("items", [])
+        if event.get("demand_date") and event["demand_date"] > reference_date
+    ]
+
+    if today_events:
+        lines.extend(format_dart_bond_event(event) for event in today_events)
+    elif dart_result.get("status") == "error":
+        lines.append("- 수집 실패로 금일 수요예측 여부를 판단할 수 없습니다.")
+    elif dart_result.get("status") == "partial":
+        lines.append("- 일부 원문 수집 실패로 금일 일정이 누락됐을 수 있습니다.")
+    else:
+        lines.append("- 금일 기준 확인된 신규 수요예측 일정이 없습니다.")
+
+    if future_events:
+        max_upcoming = max(1, parse_int_env("BOND_DART_MAX_UPCOMING", 5))
+        lines.append("<b>근접 예정 수요예측</b>")
+        lines.extend(
+            format_dart_bond_event(event, include_date=True)
+            for event in future_events[:max_upcoming]
+        )
+        if len(future_events) > max_upcoming:
+            lines.append(f"- 외 {len(future_events) - max_upcoming}건")
+
+    if dart_result.get("status") == "partial" and today_events:
+        lines.append("- 참고: 일부 DART 원문을 읽지 못해 일정이 누락됐을 수 있습니다.")
+
+    lines.append("<b>오늘 발행 (금투협 채권정보센터)</b>")
+    if kofia_result.get("status") == "ok":
+        max_issuers = max(1, parse_int_env("BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY", 8))
+        for category in BOND_CATEGORY_ORDER:
+            issuers = kofia_result.get("categories", {}).get(category, [])
+            if not issuers:
+                continue
+            issuer_texts = [
+                f"{html.escape(item['issuer'])}({format_eok_amount(item['amount_eok'])})"
+                for item in issuers[:max_issuers]
+            ]
+            if len(issuers) > max_issuers:
+                issuer_texts.append(f"외 {len(issuers) - max_issuers}개")
+            lines.append(f"- <b>{category}</b>: " + ", ".join(issuer_texts))
+        lines.append(
+            f"- 확인 발행액: <b>{format_eok_amount(kofia_result.get('total_amount_eok', 0))}</b>"
+        )
+        lines.append("- 기준: 발행액이 확인된 공모 일반채; 파생결합·사모·메자닌 제외")
+    elif kofia_result.get("status") == "empty":
+        lines.append(
+            f"- {reference_date.strftime('%m/%d')} 데이터가 아직 반영되지 않았거나 "
+            "조회 결과가 없습니다."
+        )
+    else:
+        lines.append("- 수집 실패로 금일 발행 여부를 판단할 수 없습니다.")
+
+    lines.extend([
+        "<b>GP 체크</b>",
+        "- 수요예측 후 정정공시의 유효수요·확정 스프레드·증액 여부를 "
+        "인수금융 및 리파이낸싱 벤치마크로 추적.",
+        (
+            f'출처: <a href="{DART_DEBT_BOARD_URL}">DART 채무증권 공시</a> · '
+            f'<a href="{KOFIA_BOND_CENTER_URL}">금투협 채권정보센터</a> '
+            "(발행정보: 한국예탁결제원 제공)"
+        ),
+    ])
+    return "\n".join(lines)
+
+
 # --- Data Fetcher Module ---
 def calculate_market_performance(history, mode="weekday"):
     if history is None or history.empty or "Close" not in history:
@@ -1042,8 +1863,6 @@ def fetch_news(
             "M&A 인수합병",
             "경영권 매각",
             "인수금융 리파이낸싱",
-            "M&A IT 통합",
-            "카브아웃 TSA",
         ]
     
     combined_news_context = ""
@@ -1311,8 +2130,7 @@ def build_no_new_articles_briefing(
     if target == "pef":
         pef_context = get_pef_persona_config()
         firm_name = pef_context["firm_name"]
-        pmi_role = pef_context["pmi_role"]
-        return f"""<b>👔 {today} {firm_name} GP & {pmi_role} 인사이트 브리핑{kr_holiday_text}</b>
+        return f"""<b>👔 {today} {firm_name} GP 인사이트 브리핑{kr_holiday_text}</b>
 
 <b>📭 신규 채택 뉴스 없음</b>
 - 중복 제거 및 PEF 필터 적용 결과, 오늘 새로 브리핑할 PEF/{firm_name} 관련 기사는 없습니다.{partial_warning}
@@ -1322,8 +2140,7 @@ def build_no_new_articles_briefing(
 {market_snapshot}
 
 <b>🎯 오늘/이번 주 핵심 액션</b>
-- <b>GP Action</b>: 진행 중인 딜/포트폴리오의 기존 업데이트와 미확인 데이터만 재점검.
-- <b>{pmi_role} Action</b>: 신규 기사 기반 이슈는 없으므로, 기존 IT DD/PMI 체크리스트의 미완료 항목만 팔로업."""
+- <b>GP Action</b>: 진행 중인 딜/포트폴리오의 기존 업데이트와 미확인 데이터만 재점검."""
 
     return f"""<b>📊 {today} 시장 브리핑{kr_holiday_text}</b>
 
@@ -1349,7 +2166,7 @@ def build_news_collection_failure_briefing(
     market_snapshot = build_market_snapshot(market_data, max_items=8)
     if target == "pef":
         persona = get_pef_persona_config()
-        header = f"👔 {today} {persona['firm_name']} GP & {persona['pmi_role']} 브리핑"
+        header = f"👔 {today} {persona['firm_name']} GP 브리핑"
     else:
         header = f"📊 {today} 시장 브리핑"
 
@@ -1575,9 +2392,8 @@ def generate_briefing(
     if target == "pef":
         pef_context = get_pef_persona_config()
         firm_name = pef_context["firm_name"]
-        pmi_role = pef_context["pmi_role"]
         prompt_content = f"""
-    <b>👔 {today} {firm_name} GP & {pmi_role} 인사이트 브리핑{kr_holiday_text}</b>
+    <b>👔 {today} {firm_name} GP 인사이트 브리핑{kr_holiday_text}</b>
     
     <b>📊 오늘의 투자위원회 한 줄 판단</b>
     - (딜 환경, 자금 조달 여건, 포트폴리오 운영 환경을 1-2문장으로 압축 요약)
@@ -1612,31 +2428,19 @@ def generate_briefing(
     - (직접 언급 뉴스가 없으면 "금일 수집 기준 직접 언급 뉴스 없음"으로 짧게 처리)
     
     ---
-    
-    <b>🖥️ {pmi_role} 핵심 체크</b>
-    - <b>Day-1/TSA</b>: (분리/통합, 의존 시스템, 서비스 연속성에서 지금 확인할 1가지)
-    - <b>보안/데이터</b>: (사이버보안, 개인정보, 데이터 이전/접근권한에서 지금 확인할 1가지)
-    - <b>100일 IT 실행</b>: (ERP/앱/인프라/데이터 중 밸류업이나 리스크 완화에 바로 연결되는 1가지)
-    
-    ---
-    
+
     <b>🎯 오늘/이번 주 핵심 액션 플랜</b>
     <b>GP Action</b>
     - (투자팀이 오늘 확인/실행할 일 1-2개)
-    
-    <b>{pmi_role} Action</b>
-    - (IT PMI 관점에서 바로 점검할 일 1-2개)
         """
         role_description = (
             f"You are the internal morning-briefing writer for {firm_name}, a Korea-focused private equity GP.\n"
-            f"Your audience is the deal team, investment committee, operating partners, and an {pmi_role}.\n"
+            "Your audience is the deal team, investment committee, and operating partners.\n"
             "Write like an actionable internal memo, not a public newsletter."
         )
         specific_instructions = f"""
     - **Perspective**: Prioritize implications for sourcing, underwriting, financing, exit, and portfolio value creation.
     - **Firm mention radar**: Use only articles marked "FIRM MENTION ARTICLE" for the {firm_name} mention/news radar. Extract concrete company, institution, or person names from those articles. Do not invent names.
-    - **IT PMI**: Keep the IT PMI section to exactly 3 bullets. Make each bullet short, concrete, and tied to Day-1/TSA, security/data, or the first 100 days.
-    - **Inference**: If a news item is not directly about technology, infer the most plausible IT PMI implications and clearly label that part as inference.
     - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
     - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
     - **Decision discipline**: Do not turn a single article or a daily market move into a firm investment conclusion. State uncertainty and the missing evidence.
@@ -1953,9 +2757,13 @@ def main():
     combined_pef_fetch_status = merge_fetch_statuses(firm_fetch_status, pef_fetch_status)
     log_fetch_status(combined_pef_fetch_status, "combined PEF")
     pef_source_links = dedupe_links(firm_mention_links + pef_links)
-    
-    # 8. Generate PEF Briefing
-    logging.info("7. Generating PEF Briefing using Gemini...")
+
+    # 8. Fetch official bond issuance market data for the PEF channel.
+    logging.info("7. Fetching Bond Issuance Market Data (DART/KOFIA)...")
+    bond_market_data = fetch_bond_market_data(today)
+
+    # 9. Generate PEF Briefing
+    logging.info("8. Generating PEF Briefing using Gemini...")
     briefing_pef = generate_briefing(
         market_data, 
         combined_pef_context,
@@ -1968,29 +2776,36 @@ def main():
         briefing_date=today,
         fetch_status=combined_pef_fetch_status,
     )
+    if briefing_generation_succeeded(briefing_pef):
+        bond_market_section = build_bond_market_section(
+            bond_market_data,
+            reference_date=today,
+        )
+        if bond_market_section:
+            briefing_pef = f"{briefing_pef.rstrip()}\n\n{bond_market_section}"
     
     pef_links_message = build_news_links_message(
         pef_source_links,
         title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크"
     )
     
-    # 9. Print PEF Briefing to Console
+    # 10. Print PEF Briefing to Console
     logging.info("\n" + "="*50)
     logging.info(briefing_pef) 
     logging.info("="*50 + "\n")
     
-    # 10. Send PEF Briefing to Telegram
+    # 11. Send PEF Briefing to Telegram
     if test_mode:
-         logging.info("8. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("9. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
-        logging.info("8. Sending PEF Briefing to Telegram...")
+        logging.info("9. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
             pef_delivery_complete = False
             if briefing_generation_succeeded(briefing_pef):
                 pef_sent = send_telegram_message(briefing_pef, target="pef")
                 pef_links_sent = not pef_links_message
                 if pef_sent and pef_links_message:
-                    logging.info("9. Sending PEF source links to Telegram...")
+                    logging.info("10. Sending PEF source links to Telegram...")
                     pef_links_sent = send_telegram_message(pef_links_message, target="pef")
                 pef_delivery_complete = pef_sent and pef_links_sent
             else:

@@ -106,6 +106,7 @@ class HistoryTransactionTests(unittest.TestCase):
     @patch("main.save_news_history")
     @patch("main.send_telegram_message", side_effect=[True, True, False])
     @patch("main.generate_briefing", side_effect=["<b>general</b>", "<b>pef</b>"])
+    @patch("main.fetch_bond_market_data", return_value={"enabled": False})
     @patch("main.fetch_firm_mention_news")
     @patch("main.fetch_news")
     @patch("main.fetch_market_data", return_value={})
@@ -117,6 +118,7 @@ class HistoryTransactionTests(unittest.TestCase):
         _mock_market,
         mock_fetch_news,
         mock_fetch_firm,
+        _mock_bond_market,
         _mock_generate,
         _mock_send,
         mock_save,
@@ -212,6 +214,122 @@ class GeminiConfigTests(unittest.TestCase):
         models = main.get_gemini_models()
         self.assertEqual(models[0], "gemini-3.6-flash")
         self.assertNotIn("gemini-2.5-pro", models)
+
+
+class PefBriefingFormatTests(unittest.TestCase):
+    def test_no_news_fallback_has_no_it_pmi_role_or_actions(self):
+        status = main.new_fetch_status("pef")
+        status.update({"queries_attempted": 1, "queries_succeeded": 1})
+
+        briefing = main.generate_briefing(
+            {},
+            "",
+            target="pef",
+            briefing_date=date(2026, 7, 23),
+            fetch_status=status,
+        )
+
+        self.assertIn("Baikal Investment GP 인사이트 브리핑", briefing)
+        self.assertNotIn("IT PMI", briefing)
+        self.assertNotIn("Day-1", briefing)
+        self.assertNotIn("TSA", briefing)
+
+
+class BondMarketTests(unittest.TestCase):
+    def test_parses_dart_toc_and_bond_event(self):
+        report_html = """
+        <script>
+        var node3 = {};
+        node3['text'] = "1. 공모개요";
+        node3['rcpNo'] = "20260720000318";
+        node3['dcmNo'] = "11483351";
+        node3['eleId'] = "8";
+        node3['offset'] = "81409";
+        node3['length'] = "19095";
+        node3['dtd'] = "dart4.xsd";
+        </script>
+        """
+        sections = main.parse_dart_toc_sections(report_html)
+        overview_section = main.find_dart_toc_section(sections, "공모개요")
+        self.assertEqual(overview_section["eleId"], "8")
+
+        overview_html = """
+        <table>
+          <tr><td>전자등록총액</td><td>80,000,000,000</td></tr>
+          <tr><td>평가결과등급</td><td>AA-(안정적)</td></tr>
+          <tr><td>상 환 기 한</td><td>2028년 07월 30일</td></tr>
+        </table>
+        <p>본 사채는 2026년 07월 23일 09시에서 16시까지
+        한국금융투자협회 K-Bond 시스템을 통해 실시하는 수요예측결과에 따라
+        발행조건이 결정될 예정입니다.</p>
+        <p>수요예측 결과에 따라 전자등록총액 합계 금 사천억원
+        (\\400,000,000,000) 이하의 범위에서 증액할 수 있습니다.</p>
+        <p>공모희망금리는 회사채 개별민평 수익률에
+        -0.30%p. ~ +0.30%p.를 가산합니다.</p>
+        <table>
+          <tr><td>전자등록총액</td><td>120,000,000,000</td></tr>
+          <tr><td>평가결과등급</td><td>AA-(안정적)</td></tr>
+          <tr><td>상 환 기 한</td><td>2029년 07월 30일</td></tr>
+        </table>
+        """
+        disclosure = {
+            "issuer": "케이씨씨",
+            "security_type": "무보증사채",
+            "payment_date": date(2026, 7, 30),
+            "receipt_date": date(2026, 7, 20),
+            "rcp_no": "20260720000318",
+            "report_url": "https://dart.example/report",
+        }
+        event = main.parse_dart_bond_event(disclosure, overview_html)
+
+        self.assertEqual(event["demand_date"], date(2026, 7, 23))
+        self.assertEqual(event["start_time"], "09:00")
+        self.assertEqual(event["end_time"], "16:00")
+        self.assertEqual(event["amount_eok"], 2000)
+        self.assertEqual(event["max_amount_eok"], 4000)
+        self.assertEqual(event["rating"], "AA-")
+        self.assertEqual(event["term"], "2년/3년")
+        self.assertEqual(event["rate_band"], "개별민평 -30~+30bp")
+
+    def test_kofia_filters_and_aggregates_plain_public_bonds(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <root><message><proframeHeader><pfmResponseDtal/></proframeHeader>
+        <BISComDspDatDTO><val1>국가철도공단채권453</val1><val3>20260723</val3>
+        <val6>3000</val6><val9>4.28</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>삼성카드2897</val1><val3>20260723</val3>
+        <val6>400</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>한국장학재단26-20(사)</val1><val3>20260723</val3>
+        <val6>700</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>코람코리츠 7(사모)</val1><val3>20260723</val3>
+        <val6>50</val6><val9>5.7</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>하나증권(DLB)2800</val1><val3>20260723</val3>
+        <val6>100</val6><val9>-</val9></BISComDspDatDTO>
+        </message></root>""".encode("utf-8")
+
+        records = main.parse_kofia_issuance_response(xml)
+        categories, total = main.aggregate_kofia_issuance(records)
+
+        self.assertEqual(len(records), 3)
+        self.assertEqual(total, 4100)
+        self.assertEqual(
+            {item["issuer"] for item in categories["공사채"]},
+            {"국가철도공단", "한국장학재단"},
+        )
+        self.assertEqual(categories["여전채"][0]["issuer"], "삼성카드")
+
+    def test_section_distinguishes_empty_data_from_collection_error(self):
+        section = main.build_bond_market_section(
+            {
+                "enabled": True,
+                "reference_date": date(2026, 7, 23),
+                "dart": {"status": "empty", "items": []},
+                "kofia": {"status": "error", "items": [], "categories": {}},
+            }
+        )
+
+        self.assertIn("확인된 신규 수요예측 일정이 없습니다", section)
+        self.assertIn("수집 실패로 금일 발행 여부를 판단할 수 없습니다", section)
+        self.assertNotIn("<b>공사채</b>", section)
 
 
 if __name__ == "__main__":
