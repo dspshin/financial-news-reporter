@@ -6,15 +6,16 @@
 
 - **시장 데이터 수집**: `yfinance`를 사용하여 주요 지수(KOSPI, KOSDAQ, S&P 500, NASDAQ 등)와 환율, 비트코인 시세를 조회합니다.
 - **뉴스 크롤링 & 분석**: Google News RSS를 통해 주요 경제 뉴스(미국 증시 마감, 특징주, 국내 증시 전망)를 수집하고, 기사 본문을 스크래핑하여 분석합니다.
-- **AI 기반 브리핑 생성**: 수집된 데이터를 바탕으로 Gemini(2.0 Flash 등)가 전문 애널리스트 페르소나로 보고서를 작성합니다.
+- **AI 기반 브리핑 생성**: 최신 `google-genai` SDK와 Gemini 3.x GA 모델 폴백 체인을 사용해 근거 중심 보고서를 작성합니다.
     - **평일 (월~금)**: 한국 증시 데일리 전망 및 전략
     - **토요일**: 미 증시 마감 기준 글로벌 증시 주간 요약
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
 - **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
 - **Baikal 언급 뉴스 레이더**: `PEF_FIRM_NAME`으로 지정한 운용사명이 직접 언급된 최신 뉴스를 별도 수집하고, 기사에 등장한 회사/기관/인물을 요약합니다.
 - **IT PMI 관점 보강**: PEF 브리핑에서 Day-1/TSA, 보안/데이터, 100일 IT 실행 항목을 간단한 체크포인트로 정리합니다.
-- **중복 뉴스 방지**: 실전 실행에서 채택된 기사를 히스토리 파일에 기록해 다음 실행부터 같은 링크/제목의 뉴스를 건너뜁니다. (`--test` 실행은 히스토리를 저장하지 않음)
-- **신규 뉴스 없음 처리**: 중복 제거 결과 신규 채택 기사가 0건이면 빈 섹션을 만들지 않고, 시장 데이터와 액션 중심의 간단한 fallback 브리핑을 전송합니다.
+- **중복 뉴스 방지**: 같은 링크/제목뿐 아니라 유사 제목의 동일 사건도 제거합니다. 기사는 Telegram 본문과 링크 전송이 모두 성공한 뒤에만 히스토리에 기록됩니다.
+- **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
+- **주말 수익률**: 토·일요일 브리핑은 전일 등락률이 아닌 약 1주 전 최근 거래일 대비 주간 등락률을 사용합니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **휴장일 자동 감지**:
     - **한국 증시 휴장일**: "오늘의 증시 전망" 대신 글로벌 시황 위주의 리포트 작성
@@ -23,7 +24,7 @@
 ## 🛠 설치 및 설정 (Installation)
 
 ### 1. 요구 사항 (Prerequisites)
-- Python 3.8 이상
+- Python 3.9 이상
 - Google Gemini API Key
 - Telegram Bot Token & Channel ID
 
@@ -42,6 +43,9 @@ pip install -r requirements.txt
 ```ini
 # Gemini API Key (https://aistudio.google.com/)
 GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_MODELS=gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite
+GEMINI_MAX_ATTEMPTS_PER_MODEL=1
+GEMINI_RETRY_DELAY_SECONDS=5
 
 # Telegram 설정 (https://core.telegram.org/bots)
 TELEGRAM_BOT_TOKEN=your_bot_token_here
@@ -99,7 +103,7 @@ python main.py --date 2024-12-25 --test
 ```bash
 python main.py test
 ```
-`test` 또는 `--test` 모드에서는 기존 히스토리를 읽어 중복 여부는 확인하지만, 새로 수집한 뉴스는 히스토리에 저장하지 않습니다.
+`test` 또는 `--test` 모드에서는 기존 히스토리를 읽어 중복 여부는 확인하지만, 새로 수집한 뉴스는 히스토리에 저장하지 않습니다. 실전 모드에서도 Telegram 전송이 완료되지 않은 기사는 저장하지 않아 다음 실행에서 재시도합니다.
 링크 기준 중복은 `NEWS_HISTORY_RETENTION_DAYS` 동안 유지되고, 제목 기준 중복은 반복 제목 오탐을 줄이기 위해 `NEWS_HISTORY_TITLE_MATCH_DAYS` 동안만 적용됩니다.
 
 ### 중복 뉴스 히스토리 비활성화

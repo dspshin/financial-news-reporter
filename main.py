@@ -3,7 +3,7 @@ import sys
 import requests
 import yfinance as yf
 import feedparser
-import google.generativeai as genai
+from google import genai
 import holidays
 import html
 import json
@@ -122,7 +122,8 @@ PEF_TRUSTED_SOURCE_KEYWORDS = [
 ]
 
 PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
-    "냉동공조저널", "기계신문", "주달", "ipdaily", "pressclub global", "brunch.co.kr"
+    "냉동공조저널", "기계신문", "주달", "ipdaily", "pressclub global", "brunch.co.kr",
+    "ai넷",
 ]
 
 FIRM_SHORT_NAME_CONTEXT_KEYWORDS = [
@@ -131,11 +132,53 @@ FIRM_SHORT_NAME_CONTEXT_KEYWORDS = [
 ]
 
 TELEGRAM_MESSAGE_LIMIT = 3900
-PEF_MIN_ACCEPTED_ARTICLES = 3
 PEF_FIRM_MENTION_MAX_ARTICLES = 5
 DEFAULT_NEWS_HISTORY_FILE = ".news_history.json"
 DEFAULT_NEWS_HISTORY_RETENTION_DAYS = 30
 DEFAULT_NEWS_HISTORY_TITLE_MATCH_DAYS = 7
+DEFAULT_GEMINI_MODELS = (
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
+)
+
+PEF_DIRECT_KEYWORDS = [
+    "pef", "private equity", "사모펀드", "사모투자", "바이아웃",
+    "블라인드펀드", "프로젝트펀드", "펀드레이징", "gp 모집",
+]
+
+PEF_TITLE_DEAL_KEYWORDS = [
+    "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
+    "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "인수금융",
+    "리파이낸싱", "엑시트", "회수", "사모대출", "private credit",
+]
+
+PEF_PUBLIC_MARKET_NOISE_KEYWORDS = [
+    "장내매도", "장내 매도", "주식 매도", "보유주식 매도", "보유 주식 매도",
+    "개인 유동성", "임원 주식", "주주들", "주당", "순매수", "순매도",
+    "공매도", "주가 급등", "주가 급락", "대량보유 공시",
+]
+
+PEF_FINANCIAL_PRODUCT_NOISE_KEYWORDS = [
+    "공모펀드", "재간접", "펀드 판매", "단독 판매", "판매 개시", "가입 이벤트",
+]
+
+EVENT_ACTION_ROOTS = (
+    "인수", "매각", "합병", "분할", "투자", "유치", "상장", "ipo",
+    "회수", "엑시트", "소송", "제재", "승인", "선정", "모집", "통합",
+    "인수금융", "리파이낸싱", "증자", "전환",
+)
+
+KOREAN_PARTICLE_SUFFIXES = (
+    "으로", "에서", "에게", "까지", "부터", "처럼", "보다", "로", "은", "는",
+    "이", "가", "을", "를", "의", "에", "와", "과", "도",
+)
+
+EVENT_TITLE_STOPWORDS = {
+    "관련", "대한", "통해", "위해", "추진", "계획", "전망", "가능성", "논란",
+    "단독", "속보", "종합", "포토", "영상", "기자", "오늘", "이번", "최근",
+    "시장", "업계", "기업", "회사", "그룹", "회장", "대표", "목적", "확보",
+}
 
 
 # --- Logging Configuration ---
@@ -176,14 +219,26 @@ def extract_article_source(title):
 def evaluate_pef_article(title, link, content):
     """
     Score a candidate article for PEF usefulness before it reaches the prompt.
+
+    Core relevance is anchored in the headline. Full article text is used to enrich
+    categories, but incidental body keywords cannot promote an unrelated headline.
     """
     source = extract_article_source(title)
+    headline = normalize_text(title.rsplit(" - ", 1)[0])
     text = normalize_text(title, content, source, link)
 
     hard_noise_hits = sorted({kw for kw in PEF_HARD_EXCLUDE_KEYWORDS if kw in text})
     soft_noise_hits = sorted({kw for kw in PEF_SOFT_EXCLUDE_KEYWORDS if kw in text})
-    strong_signal_hits = sorted({kw for kw in PEF_STRONG_SIGNAL_KEYWORDS if kw in text})
-    medium_signal_hits = sorted({kw for kw in PEF_MEDIUM_SIGNAL_KEYWORDS if kw in text})
+    direct_pe_hits = sorted({kw for kw in PEF_DIRECT_KEYWORDS if kw in headline})
+    deal_title_hits = sorted({kw for kw in PEF_TITLE_DEAL_KEYWORDS if kw in headline})
+    public_market_noise_hits = sorted({
+        kw for kw in PEF_PUBLIC_MARKET_NOISE_KEYWORDS if kw in headline
+    })
+    financial_product_noise_hits = sorted({
+        kw for kw in PEF_FINANCIAL_PRODUCT_NOISE_KEYWORDS if kw in headline
+    })
+    strong_signal_hits = sorted({kw for kw in PEF_STRONG_SIGNAL_KEYWORDS if kw in headline})
+    medium_signal_hits = sorted({kw for kw in PEF_MEDIUM_SIGNAL_KEYWORDS if kw in headline})
 
     categories = []
     category_reason_samples = []
@@ -193,12 +248,16 @@ def evaluate_pef_article(title, link, content):
         hits = [kw for kw in keywords if kw in text]
         if hits:
             categories.append(category)
-            score += 2 if category in {"deal_sourcing", "financing_exit", "it_pmi"} else 1
+            score += 2 if category in {"deal_sourcing", "financing_exit"} else 1
             label = PEF_CATEGORY_LABELS.get(category, category)
             category_reason_samples.append(f"{label}:{', '.join(hits[:2])}")
 
-    if strong_signal_hits:
-        score += min(len(strong_signal_hits), 3) * 2
+    if direct_pe_hits:
+        score += 4
+    if deal_title_hits:
+        score += 3
+    elif strong_signal_hits:
+        score += min(len(strong_signal_hits), 2) * 2
     if medium_signal_hits:
         score += min(len(medium_signal_hits), 2)
 
@@ -215,7 +274,7 @@ def evaluate_pef_article(title, link, content):
     low_signal_source = any(token.lower() in source_lower for token in PEF_LOW_SIGNAL_SOURCE_KEYWORDS)
 
     if trusted_source:
-        score += 2
+        score += 1
     if low_signal_source:
         score -= 2
     if hard_noise_hits:
@@ -223,17 +282,27 @@ def evaluate_pef_article(title, link, content):
     if soft_noise_hits:
         score -= 2
 
-    categories_set = set(categories)
-    has_core_signal = bool(
-        strong_signal_hits
-        or medium_signal_hits
-        or (categories_set - {"macro_regulation"})
-        or ("macro_regulation" in categories_set and trusted_source)
+    has_core_signal = bool(direct_pe_hits or deal_title_hits)
+    has_control_context = any(
+        keyword in headline
+        for keyword in ("경영권", "최대주주", "인수", "m&a", "사모펀드", "pef")
     )
-    accepted = score >= 3 and has_core_signal and not hard_noise_hits
-    promotable = score >= 1 and has_core_signal and not hard_noise_hits and not low_signal_source
+    is_public_market_noise = bool(public_market_noise_hits) and not has_control_context
+    is_financial_product_noise = bool(financial_product_noise_hits) and not deal_title_hits
+    accepted = (
+        score >= 4
+        and has_core_signal
+        and not is_public_market_noise
+        and not is_financial_product_noise
+        and not low_signal_source
+    )
+    promotable = accepted
 
     reasons = []
+    if direct_pe_hits:
+        reasons.append(f"pef_anchor:{', '.join(direct_pe_hits[:3])}")
+    if deal_title_hits:
+        reasons.append(f"headline_deal:{', '.join(deal_title_hits[:3])}")
     if strong_signal_hits:
         reasons.append(f"signal:{', '.join(strong_signal_hits[:3])}")
     if medium_signal_hits:
@@ -247,6 +316,12 @@ def evaluate_pef_article(title, link, content):
         reasons.append(f"soft_noise:{', '.join(soft_noise_hits[:2])}")
     if hard_noise_hits:
         reasons.append(f"hard_noise:{', '.join(hard_noise_hits[:2])}")
+    if public_market_noise_hits:
+        reasons.append(f"public_market_noise:{', '.join(public_market_noise_hits[:2])}")
+    if financial_product_noise_hits:
+        reasons.append(f"financial_product_noise:{', '.join(financial_product_noise_hits[:2])}")
+    if not has_core_signal:
+        reasons.append("no_headline_pef_or_deal_anchor")
     if not content:
         reasons.append("missing_content")
 
@@ -302,6 +377,25 @@ def parse_bool_env(name, default=True):
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def get_gemini_models():
+    configured = os.getenv("GEMINI_MODELS", "")
+    if configured.strip():
+        models = [model.strip() for model in configured.split(",") if model.strip()]
+        if models:
+            return models
+    return list(DEFAULT_GEMINI_MODELS)
+
+
+def is_rate_limit_error(error):
+    status_code = getattr(error, "status_code", None) or getattr(error, "code", None)
+    message = str(error).lower()
+    return status_code == 429 or "429" in message or "resource_exhausted" in message
+
+
+def briefing_generation_succeeded(briefing):
+    return bool(briefing and not briefing.lstrip().lower().startswith("error:"))
+
+
 def build_firm_news_queries(firm_name):
     firm_name = firm_name or ""
     env_queries = os.getenv("PEF_FIRM_NEWS_QUERIES")
@@ -350,6 +444,116 @@ def normalize_title_for_dedupe(title):
     return re.sub(r"\s+-\s+[^-]+$", "", normalized)
 
 
+def get_event_title_tokens(title):
+    normalized = normalize_title_for_dedupe(title)
+    tokens = []
+    for raw_token in re.findall(r"[0-9a-zA-Z가-힣]+", normalized):
+        token = raw_token.lower()
+        if len(token) < 2 or token in EVENT_TITLE_STOPWORDS:
+            continue
+        for suffix in KOREAN_PARTICLE_SUFFIXES:
+            if token.endswith(suffix) and len(token) - len(suffix) >= 2:
+                token = token[:-len(suffix)]
+                break
+        if token in EVENT_TITLE_STOPWORDS:
+            continue
+        for action_root in sorted(EVENT_ACTION_ROOTS, key=len, reverse=True):
+            if token.startswith(action_root):
+                token = action_root
+                break
+        tokens.append(token)
+    return set(tokens)
+
+
+def is_same_news_event(left_title, right_title):
+    if normalize_title_for_dedupe(left_title) == normalize_title_for_dedupe(right_title):
+        return True
+
+    left_tokens = get_event_title_tokens(left_title)
+    right_tokens = get_event_title_tokens(right_title)
+    if not left_tokens or not right_tokens:
+        return False
+
+    action_tokens = set(EVENT_ACTION_ROOTS)
+    common_actions = (left_tokens & right_tokens) & action_tokens
+    if not common_actions:
+        return False
+
+    common_tokens = left_tokens & right_tokens
+    common_entities = common_tokens - action_tokens
+    if len(common_entities) < 2:
+        return False
+
+    overlap = len(common_tokens) / min(len(left_tokens), len(right_tokens))
+    jaccard = len(common_tokens) / len(left_tokens | right_tokens)
+    if overlap >= 0.65 and jaccard >= 0.45:
+        return True
+    return (
+        len(common_tokens) >= 3
+        and overlap >= 0.4
+        and any(len(token) >= 4 for token in common_entities)
+    )
+
+
+def find_duplicate_event_title(title, existing_titles):
+    for existing_title in existing_titles or []:
+        if is_same_news_event(title, existing_title):
+            return existing_title
+    return None
+
+
+def new_fetch_status(source):
+    return {
+        "source": source,
+        "queries_attempted": 0,
+        "queries_succeeded": 0,
+        "queries_failed": 0,
+        "entries_found": 0,
+        "errors": [],
+    }
+
+
+def merge_fetch_statuses(*statuses):
+    merged = new_fetch_status("combined")
+    for status in statuses:
+        if not status:
+            continue
+        for key in (
+            "queries_attempted", "queries_succeeded", "queries_failed", "entries_found"
+        ):
+            merged[key] += status.get(key, 0)
+        merged["errors"].extend(status.get("errors", []))
+    return merged
+
+
+def is_fetch_outage(status):
+    return bool(
+        status
+        and status.get("queries_attempted", 0) > 0
+        and status.get("queries_succeeded", 0) == 0
+    )
+
+
+def is_partial_fetch_failure(status):
+    return bool(
+        status
+        and status.get("queries_succeeded", 0) > 0
+        and status.get("queries_failed", 0) > 0
+    )
+
+
+def log_fetch_status(status, label):
+    logging.info(
+        f"   [News Fetch] {label}: success={status.get('queries_succeeded', 0)}/"
+        f"{status.get('queries_attempted', 0)}, failed={status.get('queries_failed', 0)}, "
+        f"entries={status.get('entries_found', 0)}"
+    )
+
+
+def history_scope(target):
+    return "pef" if target in {"pef", "firm_mention"} else "general"
+
+
 def get_news_history_path():
     return os.getenv("NEWS_HISTORY_FILE", DEFAULT_NEWS_HISTORY_FILE)
 
@@ -391,6 +595,15 @@ def normalize_history_articles(raw_data):
 def build_news_history_state(articles, path, title_key_cutoff_date=None, title_match_enabled=True):
     links = {article["link"] for article in articles if article.get("link")}
     title_keys = set()
+    links_by_target = {"general": set(), "pef": set()}
+    title_keys_by_target = {"general": set(), "pef": set()}
+    event_titles_by_target = {"general": [], "pef": []}
+
+    for article in articles:
+        scope = history_scope(article.get("target"))
+        if article.get("link"):
+            links_by_target[scope].add(article["link"])
+
     if title_match_enabled:
         for article in articles:
             title_key = article.get("title_key")
@@ -400,11 +613,18 @@ def build_news_history_state(articles, path, title_key_cutoff_date=None, title_m
             if title_key_cutoff_date and collected_date and collected_date < title_key_cutoff_date:
                 continue
             title_keys.add(title_key)
+            scope = history_scope(article.get("target"))
+            title_keys_by_target[scope].add(title_key)
+            if article.get("title"):
+                event_titles_by_target[scope].append(article["title"])
     return {
         "path": path,
         "articles": articles,
         "links": links,
         "title_keys": title_keys,
+        "links_by_target": links_by_target,
+        "title_keys_by_target": title_keys_by_target,
+        "event_titles_by_target": event_titles_by_target,
         "title_match_enabled": title_match_enabled,
     }
 
@@ -468,7 +688,7 @@ def save_news_history(history):
         logging.error(f"   [News History] Failed to save {path}: {e}")
 
 
-def should_skip_seen_article(entry, history, seen_title_keys=None):
+def should_skip_seen_article(entry, history, target="general", seen_title_keys=None):
     if not history:
         title_key = normalize_title_for_dedupe(entry.title)
         if seen_title_keys is not None and title_key in seen_title_keys:
@@ -476,36 +696,73 @@ def should_skip_seen_article(entry, history, seen_title_keys=None):
         return False, None, title_key
 
     title_key = normalize_title_for_dedupe(entry.title)
-    if entry.link in history.get("links", set()):
+    scope = history_scope(target)
+    target_links = history.get("links_by_target", {}).get(scope, history.get("links", set()))
+    target_title_keys = history.get("title_keys_by_target", {}).get(
+        scope, history.get("title_keys", set())
+    )
+    if entry.link in target_links:
         return True, "link", title_key
-    if title_key and title_key in history.get("title_keys", set()):
+    if title_key and title_key in target_title_keys:
         return True, "title", title_key
+    duplicate_title = find_duplicate_event_title(
+        entry.title,
+        history.get("event_titles_by_target", {}).get(scope, []),
+    )
+    if duplicate_title:
+        return True, "same_event", title_key
     if seen_title_keys is not None and title_key in seen_title_keys:
         return True, "title_in_run", title_key
     return False, None, title_key
 
 
-def mark_article_collected(history, entry, target, collected_date=None):
-    if not history:
-        return
-
+def stage_article_for_history(pending_articles, entry, target, collected_date=None):
     title_key = normalize_title_for_dedupe(entry.title)
-    link = entry.link
-    if link in history.get("links", set()) or title_key in history.get("title_keys", set()):
-        return
-
-    collected_at = (collected_date or datetime.now().date()).isoformat()
-    history["articles"].append({
-        "link": link,
+    record = {
+        "link": entry.link,
         "title": entry.title,
         "title_key": title_key,
         "target": target,
-        "collected_at": collected_at,
-    })
-    if link:
-        history["links"].add(link)
-    if title_key and history.get("title_match_enabled", True):
-        history["title_keys"].add(title_key)
+        "collected_at": (collected_date or datetime.now().date()).isoformat(),
+    }
+    scope = history_scope(target)
+    for pending in pending_articles:
+        if history_scope(pending.get("target")) != scope:
+            continue
+        if entry.link and entry.link == pending.get("link"):
+            return
+        if title_key and title_key == pending.get("title_key"):
+            return
+    pending_articles.append(record)
+
+
+def commit_pending_articles(history, pending_articles):
+    if not history or not pending_articles:
+        return 0
+
+    committed = 0
+    for article in pending_articles:
+        scope = history_scope(article.get("target"))
+        target_links = history["links_by_target"].setdefault(scope, set())
+        target_title_keys = history["title_keys_by_target"].setdefault(scope, set())
+        link = article.get("link")
+        title_key = article.get("title_key")
+        if link and link in target_links:
+            continue
+        if title_key and title_key in target_title_keys:
+            continue
+
+        history["articles"].append(article)
+        if link:
+            history["links"].add(link)
+            target_links.add(link)
+        if title_key and history.get("title_match_enabled", True):
+            history["title_keys"].add(title_key)
+            target_title_keys.add(title_key)
+            history["event_titles_by_target"].setdefault(scope, []).append(article.get("title", ""))
+        committed += 1
+
+    return committed
 
 
 def split_message(message, limit=TELEGRAM_MESSAGE_LIMIT):
@@ -615,7 +872,36 @@ def build_news_links_message(links, title="🔗 금일 수집된 주요 뉴스 �
     return "\n".join(lines)
 
 # --- Data Fetcher Module ---
-def fetch_market_data():
+def calculate_market_performance(history, mode="weekday"):
+    if history is None or history.empty or "Close" not in history:
+        return None
+
+    closes = history["Close"].dropna()
+    if closes.empty:
+        return None
+
+    current_price = closes.iloc[-1]
+    weekly = mode in {"saturday", "sunday"}
+    if len(closes) == 1:
+        baseline_price = current_price
+    elif weekly:
+        target_date = closes.index[-1] - timedelta(days=7)
+        eligible = closes[closes.index <= target_date]
+        baseline_price = eligible.iloc[-1] if not eligible.empty else closes.iloc[0]
+    else:
+        baseline_price = closes.iloc[-2]
+
+    change = current_price - baseline_price
+    pct_change = (change / baseline_price) * 100 if baseline_price else 0.0
+    return {
+        "price": current_price,
+        "change": change,
+        "pct_change": pct_change,
+        "period": "weekly" if weekly else "daily",
+    }
+
+
+def fetch_market_data(mode="weekday"):
     """
     Fetches key market indices and exchange rates, including Philly Semi and Russell 2000.
     """
@@ -632,28 +918,13 @@ def fetch_market_data():
     }
     
     data = {}
-    data = {}
     logging.info("   Fetching market data...")
     
     for name, symbol in tickers.items():
         try:
             ticker = yf.Ticker(symbol)
-            # Get the latest day's data
-            history = ticker.history(period="5d")
-            
-            if not history.empty:
-                current_price = history['Close'].iloc[-1]
-                prev_close = history['Close'].iloc[-2] if len(history) > 1 else current_price
-                change = current_price - prev_close
-                pct_change = (change / prev_close) * 100
-                
-                data[name] = {
-                    "price": current_price,
-                    "change": change,
-                    "pct_change": pct_change
-                }
-            else:
-                data[name] = None
+            history = ticker.history(period="1mo" if mode in {"saturday", "sunday"} else "5d")
+            data[name] = calculate_market_performance(history, mode=mode)
         except Exception as e:
             logging.error(f"   Error fetching {name}: {e}")
             data[name] = None
@@ -691,6 +962,15 @@ def scrape_article_content(url):
     except Exception as e:
         logging.error(f"   Failed to scrape {url}: {e}")
         return None
+
+
+def parse_google_news_feed(response):
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
+    if getattr(feed, "bozo", False) and not getattr(feed, "entries", []):
+        raise ValueError(f"invalid RSS response: {getattr(feed, 'bozo_exception', 'parse error')}")
+    return feed
+
 
 def fetch_news(
     mode="weekday",
@@ -753,41 +1033,55 @@ def fetch_news(
             ]
             
     if target == "pef":
-        logging.info("   [Target] PEF: Adding M&A and Private Equity queries")
-        queries.extend([
+        logging.info("   [Target] PEF: Using dedicated M&A and Private Equity queries")
+        queries = [
             "사모펀드",
+            "PEF M&A",
+            "PEF 투자 규제",
+            "사모펀드 운용사 GP",
             "M&A 인수합병",
-            "PEF 투자",
-            "M&A PMI",
-            "IT 통합",
-            "지분 매각",
             "경영권 매각",
-            "인수금융"
-        ])
+            "인수금융 리파이낸싱",
+            "M&A IT 통합",
+            "카브아웃 TSA",
+        ]
     
     combined_news_context = ""
     seen_links = set(initial_seen_links) if initial_seen_links else set()
     seen_title_keys = set()
-    collected_links = [] # List to store (title, link)
-    rejected_pef_candidates = []
+    accepted_event_titles = []
+    collected_links = []
+    pending_articles = []
+    fetch_status = new_fetch_status(f"{target}_news")
     
     logging.info("   Fetching news and scraping content...")
     
     for query in queries:
-        # Append ' when:1d' to the query to restrict results to the past 24 hours
         time_restricted_query = f"{query} when:1d"
-        rss_url = f"https://news.google.com/rss/search?q={time_restricted_query}&hl=ko&gl=KR&ceid=KR%3Ako"
+        fetch_status["queries_attempted"] += 1
         try:
-            response = requests.get(rss_url, timeout=10)
-            feed = feedparser.parse(response.content)
+            response = requests.get(
+                "https://news.google.com/rss/search",
+                params={
+                    "q": time_restricted_query,
+                    "hl": "ko",
+                    "gl": "KR",
+                    "ceid": "KR:ko",
+                },
+                timeout=10,
+            )
+            feed = parse_google_news_feed(response)
+            entries = list(feed.entries[:3])
+            fetch_status["queries_succeeded"] += 1
+            fetch_status["entries_found"] += len(entries)
             
-            # Take top 3 articles per query to get even more diverse news
-            for entry in feed.entries[:3]:
+            for entry in entries:
                 if entry.link in seen_links:
                     continue
                 skip_article, skip_reason, title_key = should_skip_seen_article(
                     entry,
                     news_history,
+                    target=target,
                     seen_title_keys=seen_title_keys
                 )
                 if skip_article:
@@ -804,6 +1098,7 @@ def fetch_news(
                 logging.info(f"   - Processing: {entry.title}")
                 content = scrape_article_content(entry.link)
                 
+                pef_meta = None
                 if target == "pef":
                     pef_meta = evaluate_pef_article(entry.title, entry.link, content)
                     decision = "ACCEPT" if pef_meta["accepted"] else "REJECT"
@@ -813,13 +1108,15 @@ def fetch_news(
                     )
                     if not pef_meta["accepted"]:
                         logging.info(f"      reasons: {', '.join(pef_meta['reasons'])}")
-                        if pef_meta["promotable"]:
-                            rejected_pef_candidates.append({
-                                "entry": entry,
-                                "content": content,
-                                "pef_meta": pef_meta
-                            })
                         continue
+
+                duplicate_title = find_duplicate_event_title(entry.title, accepted_event_titles)
+                if duplicate_title:
+                    logging.info(
+                        f"   [Event Dedupe] SKIP same event: {entry.title} "
+                        f"(matched: {duplicate_title})"
+                    )
+                    continue
 
                 combined_news_context = append_article_context(
                     combined_news_context,
@@ -829,54 +1126,21 @@ def fetch_news(
                     pef_meta=pef_meta if target == "pef" else None
                 )
                 collected_links.append((entry.title, entry.link))
-                mark_article_collected(news_history, entry, target, collected_date=collected_date)
+                accepted_event_titles.append(entry.title)
+                stage_article_for_history(
+                    pending_articles,
+                    entry,
+                    target,
+                    collected_date=collected_date,
+                )
                     
         except Exception as e:
+            fetch_status["queries_failed"] += 1
+            fetch_status["errors"].append(f"{query}: {type(e).__name__}: {str(e)[:200]}")
             logging.error(f"   Error fetching RSS for {query}: {e}")
 
-    if target == "pef" and len(collected_links) < PEF_MIN_ACCEPTED_ARTICLES and rejected_pef_candidates:
-        needed = PEF_MIN_ACCEPTED_ARTICLES - len(collected_links)
-        logging.info(
-            f"   [PEF Filter] Accepted {len(collected_links)} articles; "
-            f"promoting up to {needed} borderline candidates for coverage."
-        )
-        rejected_pef_candidates.sort(
-            key=lambda candidate: (
-                candidate["pef_meta"]["score"],
-                1 if candidate["pef_meta"]["trusted_source"] else 0,
-                len(candidate["content"] or "")
-            ),
-            reverse=True
-        )
-
-        for candidate in rejected_pef_candidates:
-            if needed <= 0:
-                break
-            if any(link == candidate["entry"].link for _, link in collected_links):
-                continue
-
-            pef_meta = candidate["pef_meta"]
-            logging.info(
-                f"   [PEF Filter] PROMOTE score={pef_meta['score']} "
-                f"source={pef_meta['source']} categories={', '.join(pef_meta['categories']) or 'None'}"
-            )
-            combined_news_context = append_article_context(
-                combined_news_context,
-                candidate["entry"],
-                candidate["content"],
-                target="pef",
-                pef_meta=pef_meta
-            )
-            collected_links.append((candidate["entry"].title, candidate["entry"].link))
-            mark_article_collected(
-                news_history,
-                candidate["entry"],
-                target,
-                collected_date=collected_date
-            )
-            needed -= 1
-
-    return combined_news_context, collected_links, seen_links
+    log_fetch_status(fetch_status, f"target={target}")
+    return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
 
 def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=None, collected_date=None):
@@ -889,11 +1153,14 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
     match_terms = build_firm_match_terms(firm_name)
     seen_links = set(initial_seen_links) if initial_seen_links else set()
     seen_titles = set()
+    accepted_event_titles = []
     combined_news_context = ""
     collected_links = []
+    pending_articles = []
+    fetch_status = new_fetch_status("firm_mentions")
 
     if not queries:
-        return combined_news_context, collected_links, seen_links
+        return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
     logging.info(
         f"   [Target] Firm mentions: Searching {firm_name} news "
@@ -901,7 +1168,10 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
     )
 
     for query in queries:
+        if len(collected_links) >= PEF_FIRM_MENTION_MAX_ARTICLES:
+            break
         rss_query = f'"{query}" when:{lookback_days}d'
+        fetch_status["queries_attempted"] += 1
         try:
             response = requests.get(
                 "https://news.google.com/rss/search",
@@ -913,11 +1183,14 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                 },
                 timeout=10,
             )
-            feed = feedparser.parse(response.content)
+            feed = parse_google_news_feed(response)
+            entries = list(feed.entries[:5])
+            fetch_status["queries_succeeded"] += 1
+            fetch_status["entries_found"] += len(entries)
 
-            for entry in feed.entries[:5]:
+            for entry in entries:
                 if len(collected_links) >= PEF_FIRM_MENTION_MAX_ARTICLES:
-                    return combined_news_context, collected_links, seen_links
+                    break
 
                 title_key = normalize_title_for_dedupe(entry.title)
                 if entry.link in seen_links or title_key in seen_titles:
@@ -925,6 +1198,7 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                 skip_article, skip_reason, title_key = should_skip_seen_article(
                     entry,
                     news_history,
+                    target="firm_mention",
                     seen_title_keys=seen_titles
                 )
                 if skip_article:
@@ -935,6 +1209,10 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                     seen_titles.add(title_key)
                     continue
 
+                # Mark every attempted candidate so rejected results are not scraped
+                # again through another firm-name query in the same run.
+                seen_links.add(entry.link)
+                seen_titles.add(title_key)
                 logging.info(f"   - Firm mention candidate: {entry.title}")
                 content = scrape_article_content(entry.link)
                 searchable_text = normalize_text(entry.title, content, entry.link)
@@ -943,8 +1221,14 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                     logging.info(f"      [Firm Mention] REJECT: {match_reason}")
                     continue
 
-                seen_links.add(entry.link)
-                seen_titles.add(title_key)
+                duplicate_title = find_duplicate_event_title(entry.title, accepted_event_titles)
+                if duplicate_title:
+                    logging.info(
+                        f"      [Event Dedupe] SKIP same firm event: {entry.title} "
+                        f"(matched: {duplicate_title})"
+                    )
+                    continue
+
                 logging.info(f"      [Firm Mention] ACCEPT: {match_reason}")
 
                 firm_context = ""
@@ -957,17 +1241,21 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                 firm_context += f"--- FIRM MENTION ARTICLE END ---\n"
                 combined_news_context += firm_context
                 collected_links.append((entry.title, entry.link))
-                mark_article_collected(
-                    news_history,
+                accepted_event_titles.append(entry.title)
+                stage_article_for_history(
+                    pending_articles,
                     entry,
                     "firm_mention",
                     collected_date=collected_date
                 )
 
         except Exception as e:
+            fetch_status["queries_failed"] += 1
+            fetch_status["errors"].append(f"{query}: {type(e).__name__}: {str(e)[:200]}")
             logging.error(f"   Error fetching firm mention RSS for {query}: {e}")
 
-    return combined_news_context, collected_links, seen_links
+    log_fetch_status(fetch_status, "firm mentions")
+    return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
 
 def dedupe_links(links):
@@ -997,10 +1285,28 @@ def build_market_snapshot(market_data, max_items=None):
     return "\n".join(lines) if lines else "- 시장 데이터 없음"
 
 
-def build_no_new_articles_briefing(market_data, target="general", briefing_date=None, kr_holiday_text=""):
+def get_market_period_label(market_data):
+    for data in (market_data or {}).values():
+        if data and data.get("period") == "weekly":
+            return "주간 등락률"
+    return "전일 대비"
+
+
+def build_no_new_articles_briefing(
+    market_data,
+    target="general",
+    briefing_date=None,
+    kr_holiday_text="",
+    fetch_status=None,
+):
     reference_date = briefing_date or datetime.now().date()
     today = reference_date.strftime("%m/%d(%a)")
     market_snapshot = build_market_snapshot(market_data, max_items=8)
+    partial_warning = ""
+    if is_partial_fetch_failure(fetch_status):
+        partial_warning = (
+            "\n- 일부 뉴스 검색 요청이 실패했습니다. 아래 0건 판단은 성공한 검색 범위에 한정됩니다."
+        )
 
     if target == "pef":
         pef_context = get_pef_persona_config()
@@ -1009,10 +1315,10 @@ def build_no_new_articles_briefing(market_data, target="general", briefing_date=
         return f"""<b>👔 {today} {firm_name} GP & {pmi_role} 인사이트 브리핑{kr_holiday_text}</b>
 
 <b>📭 신규 채택 뉴스 없음</b>
-- 중복 제거 및 PEF 필터 적용 결과, 오늘 새로 브리핑할 PEF/{firm_name} 관련 기사는 없습니다.
+- 중복 제거 및 PEF 필터 적용 결과, 오늘 새로 브리핑할 PEF/{firm_name} 관련 기사는 없습니다.{partial_warning}
 - 기존 기사 재사용 없이 시장 데이터와 내부 점검 액션만 간단히 확인합니다.
 
-<b>📊 시장 데이터 체크</b>
+<b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
 {market_snapshot}
 
 <b>🎯 오늘/이번 주 핵심 액션</b>
@@ -1022,25 +1328,64 @@ def build_no_new_articles_briefing(market_data, target="general", briefing_date=
     return f"""<b>📊 {today} 시장 브리핑{kr_holiday_text}</b>
 
 <b>📭 신규 채택 뉴스 없음</b>
-- 중복 제거 결과, 오늘 새로 브리핑할 뉴스 기사는 없습니다.
+- 중복 제거 결과, 오늘 새로 브리핑할 뉴스 기사는 없습니다.{partial_warning}
 - 기존 기사 재사용 없이 시장 데이터만 간단히 확인합니다.
 
-<b>📊 시장 데이터 체크</b>
+<b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
 {market_snapshot}
 
 <b>🎯 대응</b>
 - 신규 뉴스 기반 판단은 보류하고, 주요 지수/환율 변동과 기존 체크포인트 중심으로 모니터링합니다."""
 
+
+def build_news_collection_failure_briefing(
+    market_data,
+    target="general",
+    briefing_date=None,
+    kr_holiday_text="",
+):
+    reference_date = briefing_date or datetime.now().date()
+    today = reference_date.strftime("%m/%d(%a)")
+    market_snapshot = build_market_snapshot(market_data, max_items=8)
+    if target == "pef":
+        persona = get_pef_persona_config()
+        header = f"👔 {today} {persona['firm_name']} GP & {persona['pmi_role']} 브리핑"
+    else:
+        header = f"📊 {today} 시장 브리핑"
+
+    return f"""<b>{header}{kr_holiday_text}</b>
+
+<b>⚠️ 뉴스 수집 장애</b>
+- 모든 뉴스 RSS 요청이 실패해 오늘의 뉴스 유무를 확인할 수 없습니다.
+- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 뉴스 기반 분석과 투자 판단은 보류합니다.
+
+<b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
+{market_snapshot}
+
+<b>🎯 대응</b>
+- RSS 연결 상태를 확인한 뒤 재실행하고, 복구 전에는 시장 데이터만 참고합니다."""
+
 # --- Summarizer Module ---
-def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=False, is_kr_holiday=False, holiday_name_kr=None, holiday_name_us=None, target="general", briefing_date=None):
+def generate_briefing(
+    market_data,
+    news_context,
+    mode="weekday",
+    is_us_holiday=False,
+    is_kr_holiday=False,
+    holiday_name_kr=None,
+    holiday_name_us=None,
+    target="general",
+    briefing_date=None,
+    fetch_status=None,
+):
     """
-    Generates a daily economic briefing using Gemini 2.0 Flash with a structured analyst persona.
+    Generates a daily economic briefing with the configured Gemini fallback chain.
     """
     # Construct the prompt
     reference_date = briefing_date or datetime.now().date()
     today = reference_date.strftime("%m/%d(%a)")
     
-    market_summary = "## Market Data Indices\n"
+    market_summary = f"## Market Data Indices ({get_market_period_label(market_data)})\n"
     if market_data:
         for name, data in market_data.items():
             if data:
@@ -1056,19 +1401,37 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     kr_holiday_text = f" (국내 휴장: {holiday_name_kr})" if is_kr_holiday else ""
 
     if not (news_context or "").strip():
+        if is_fetch_outage(fetch_status):
+            logging.warning(
+                f"   [News Fetch] All requests failed for target='{target}'. "
+                "Using collection-failure briefing."
+            )
+            return build_news_collection_failure_briefing(
+                market_data,
+                target=target,
+                briefing_date=reference_date,
+                kr_holiday_text=kr_holiday_text,
+            )
         logging.info(f"   [No News] No new articles for target='{target}'. Using fallback briefing.")
         return build_no_new_articles_briefing(
             market_data,
             target=target,
             briefing_date=reference_date,
-            kr_holiday_text=kr_holiday_text
+            kr_holiday_text=kr_holiday_text,
+            fetch_status=fetch_status,
         )
 
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "Error: GEMINI_API_KEY not found in environment variables."
 
-    genai.configure(api_key=api_key)
+    if is_partial_fetch_failure(fetch_status):
+        news_context = (
+            "## NEWS COLLECTION WARNING\n"
+            "Some RSS queries failed. Base the report only on the articles below and explicitly "
+            "state that coverage was partial.\n\n"
+            + news_context
+        )
 
     # Define Prompt Template based on Mode
     if mode == "saturday":
@@ -1079,7 +1442,7 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     <b>🌍 글로벌 시장 상황 (이번 주 마감)</b>
     <b>지수</b>
     - (List major US indices: Dow, Nasdaq, S&P500, Russell 2000, Philly Semi with % change)
-    - (Add a one-line comment on the weekly/daily trend)
+    - (All supplied percentage changes are weekly returns. Add a one-line weekly trend comment.)
     
     <b>핵심 특징</b>
     - (Summarize 2-3 key drivers of the US market this week. Use bolding for keywords.)
@@ -1139,7 +1502,7 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     ---
     
     <b>🎯 다음 주 대응 전략</b>
-    - (General investment strategy advice for the upcoming week)
+    - (List monitoring priorities and conditions that would change the view; do not give buy/sell instructions.)
         """
         
     else:
@@ -1182,33 +1545,16 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
         else:
             kr_section = """
     <b>🇰🇷 한국 증시 오늘 전망</b>
-    <b>예상 범위</b>
-    <b>코스피: (Estimate a range)</b>
+    - <b>방향성</b>: (상승 우위/중립/하락 우위 중 하나. 입력 근거가 약하면 중립)
+    - <b>신뢰도</b>: (낮음/보통/높음 중 하나)
+    - <b>근거</b>: (입력 데이터와 기사에서 확인되는 근거 2-3개)
             """
             extra_section = """
-    <b>🚀 오늘의 최강 테마 (우선순위)</b>
-    
-    <b>🥇 1순위: (Sector Name)</b>
-    <b>(Catchy Slogan)</b>
-    <b>관련주:</b>
-    - (List stocks)
-    <b>호재:</b>
-    - (Why this sector?)
-    
-    <b>🥈 2순위: (Sector Name)</b>
-    ...
-    
-    ---
-    
-    <b>🎯 매매 전략 (종합)</b>
-    <b>🟢 공격적 매수</b>
-    - (Sectors/Stocks)
-    
-    <b>🟡 관망/보유</b>
-    - (Sectors)
-    
-    <b>🔴 주의/매도</b>
-    - (Sectors)
+    <b>🔎 오늘의 관찰 테마</b>
+    - (기사에 직접 근거가 있는 섹터/테마 최대 2개와 확인할 조건)
+
+    <b>🎯 리스크 체크</b>
+    - (전망을 무효화할 변수와 오늘 확인할 데이터 2-3개)
             """
 
         prompt_content = f"""
@@ -1217,14 +1563,10 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     {us_section}
     
     ---
-    
-    {extra_section if not is_kr_holiday else ""}
-    
     {kr_section}
     
     ---
-    
-    {extra_section if is_kr_holiday else ""}
+    {extra_section}
     
     <b>🎬 결론</b>
     (One sentence summary)
@@ -1297,11 +1639,21 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
     - **Inference**: If a news item is not directly about technology, infer the most plausible IT PMI implications and clearly label that part as inference.
     - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
     - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
+    - **Decision discipline**: Do not turn a single article or a daily market move into a firm investment conclusion. State uncertainty and the missing evidence.
     - **Length**: Keep the full briefing concise enough for one Telegram message when possible.
     """
     else:
-        role_description = "You are a top-tier Financial Analyst.\n    Based on the provided Market Data and News Articles, write a Report."
-        specific_instructions = "- **Specifics**: Use ACTUAL numbers from the articles."
+        role_description = (
+            "You are a cautious market-briefing analyst.\n"
+            "Based only on the supplied Market Data and News Articles, write an evidence-led report."
+        )
+        specific_instructions = """
+    - **Evidence boundary**: Use only numbers, dates, company names, and events present in the input. Never invent an index range, price target, schedule, or causal explanation.
+    - **Market data meaning**: Treat supplied percentages as historical performance, not a forecast. On weekends they are weekly returns; on weekdays they are previous-close returns.
+    - **Uncertainty**: Label unsupported interpretation as "(추론)" and use low confidence when evidence is thin or mixed.
+    - **No trading directives**: Do not use language such as aggressive buy, sell, must buy, or target price. Provide monitoring priorities and conditions instead.
+    - **Article scope**: A single article cannot establish a broad market regime. Separate confirmed facts from a tentative implication.
+    """
 
     prompt = f"""
     {role_description}
@@ -1324,36 +1676,49 @@ def generate_briefing(market_data, news_context, mode="weekday", is_us_holiday=F
         - **Colors**: Do NOT use <font color="...">. Use emojis like 🔴 (Red/Up/Hot) or 🔵 (Blue/Cool/Down) or 🔻/🔺 to represent direction/sentiment.
     {specific_instructions}
     """
-    
-    # Retry logic with Model Fallback
-    models_to_try = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-3.1-flash-lite-preview']
+
+    models_to_try = get_gemini_models()
+    max_attempts = max(1, parse_int_env("GEMINI_MAX_ATTEMPTS_PER_MODEL", 1))
+    retry_delay = max(1, parse_int_env("GEMINI_RETRY_DELAY_SECONDS", 5))
+    client = genai.Client(api_key=api_key)
     
     logging.info(f"   [Debug] Generating briefing for mode: {mode}")
     
     for model_name in models_to_try:
         logging.info(f"   Using model: {model_name}...")
-        max_retries = 3
-        retry_delay = 30
-        
-        for attempt in range(max_retries):
+
+        for attempt in range(max_attempts):
             try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                return response.text
+                response = client.models.generate_content(model=model_name, contents=prompt)
+                if not response.text:
+                    raise ValueError("Gemini returned an empty response")
+                return response.text.strip()
             except Exception as e:
-                if "429" in str(e):
-                    logging.warning(f"   [Rate Limit Hit] Waiting {retry_delay} seconds before retry ({attempt + 1}/{max_retries})...")
-                    time.sleep(retry_delay)
-                    retry_delay += 30 
-                else:
-                    logging.error(f"   Error with {model_name}: {e}")
-                    break 
+                if is_rate_limit_error(e):
+                    logging.warning(
+                        f"   [Rate Limit] {model_name} unavailable; switching to the next model."
+                    )
+                    break
+
+                logging.error(
+                    f"   Error with {model_name} (attempt {attempt + 1}/{max_attempts}): {e}"
+                )
+                if attempt + 1 < max_attempts:
+                    time.sleep(retry_delay * (attempt + 1))
         
         logging.warning(f"   Failed with {model_name}, attempting fallback...")
     
     return "Error: Failed to generate briefing with all available models."
 
 # --- Notifier Module ---
+def redact_sensitive_text(value, *secrets):
+    redacted = str(value)
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "<redacted>")
+    return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", redacted)
+
+
 def send_telegram_message(message, target="general"):
     """
     Sends a message to a Telegram channel.
@@ -1424,7 +1789,7 @@ def send_telegram_message(message, target="general"):
         )
         return False
     except requests.exceptions.RequestException as e:
-        logging.error(f"Error sending message: {e}")
+        logging.error(f"Error sending message: {redact_sensitive_text(e, bot_token)}")
         return False
 
 # --- Main Execution ---
@@ -1483,16 +1848,23 @@ def main():
     news_history = load_news_history(today=today) if news_history_enabled else None
     if not news_history_enabled:
         logging.info("   [News History] Disabled for this run.")
-    save_history_after_run = bool(news_history) and not test_mode
+    save_history_after_run = news_history is not None and not test_mode
+    pending_to_commit = []
     if news_history and test_mode:
         logging.info("   [News History] Test mode: history will be read but not saved.")
     
     # 1. Fetch Data
     logging.info("1. Fetching Market Data...")
-    market_data = fetch_market_data()
+    market_data = fetch_market_data(mode=mode)
     
     # Pass US holiday status for news fetching logic
-    news_context_general, _, seen_links_general = fetch_news(
+    (
+        news_context_general,
+        general_links,
+        _,
+        pending_general,
+        general_fetch_status,
+    ) = fetch_news(
         mode=mode,
         is_us_holiday=is_us_holiday_prev_close,
         is_kr_holiday=is_kr_holiday,
@@ -1512,7 +1884,8 @@ def main():
         holiday_name_kr=holiday_name_kr,
         holiday_name_us=holiday_name_us,
         target="general",
-        briefing_date=today
+        briefing_date=today,
+        fetch_status=general_fetch_status,
     )
     
     # 4. Print to Console
@@ -1527,7 +1900,17 @@ def main():
          logging.info("4. Sending General Briefing to Telegram... [SKIPPED] (Test Mode)")
     else:
         logging.info("4. Sending General Briefing to Telegram...")
-        send_telegram_message(briefing_general, target="general")
+        if briefing_generation_succeeded(briefing_general):
+            general_sent = send_telegram_message(briefing_general, target="general")
+            if general_sent:
+                pending_to_commit.extend(pending_general)
+            elif pending_general:
+                logging.warning(
+                    f"   [News History] General delivery failed; "
+                    f"{len(pending_general)} article(s) remain uncommitted for retry."
+                )
+        else:
+            logging.error("   Skipping General Telegram send because briefing generation failed.")
         
     # --- PEF GP Briefing ---
     logging.info("\n--- Starting PEF GP Briefing Sequence ---")
@@ -1535,25 +1918,40 @@ def main():
 
     # 6. Fetch firm mention news first so direct mentions are preserved.
     logging.info("5. Fetching & Scraping Firm Mention News...")
-    news_context_firm_mentions, firm_mention_links, seen_links_firm_mentions = fetch_firm_mention_news(
+    initial_pef_seen_links = {link for _, link in general_links}
+    (
+        news_context_firm_mentions,
+        firm_mention_links,
+        _,
+        pending_firm_mentions,
+        firm_fetch_status,
+    ) = fetch_firm_mention_news(
         pef_context["firm_name"],
-        initial_seen_links=seen_links_general,
+        initial_seen_links=initial_pef_seen_links,
         news_history=news_history,
         collected_date=today
     )
     
     # 7. Fetch additional PEF News
     logging.info("6. Fetching & Scraping PEF News...")
-    news_context_pef, pef_links, _ = fetch_news(
+    (
+        news_context_pef,
+        pef_links,
+        _,
+        pending_pef,
+        pef_fetch_status,
+    ) = fetch_news(
         mode=mode, 
         is_us_holiday=is_us_holiday_prev_close, 
         is_kr_holiday=is_kr_holiday, 
         target="pef",
-        initial_seen_links=seen_links_firm_mentions,
+        initial_seen_links=initial_pef_seen_links | {link for _, link in firm_mention_links},
         news_history=news_history,
         collected_date=today
     )
     combined_pef_context = news_context_firm_mentions + news_context_pef
+    combined_pef_fetch_status = merge_fetch_statuses(firm_fetch_status, pef_fetch_status)
+    log_fetch_status(combined_pef_fetch_status, "combined PEF")
     pef_source_links = dedupe_links(firm_mention_links + pef_links)
     
     # 8. Generate PEF Briefing
@@ -1567,7 +1965,8 @@ def main():
         holiday_name_kr=holiday_name_kr,
         holiday_name_us=holiday_name_us,
         target="pef",
-        briefing_date=today
+        briefing_date=today,
+        fetch_status=combined_pef_fetch_status,
     )
     
     pef_links_message = build_news_links_message(
@@ -1586,15 +1985,40 @@ def main():
     else:
         logging.info("8. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
-            pef_sent = send_telegram_message(briefing_pef, target="pef")
-            if pef_sent and pef_links_message:
-                logging.info("9. Sending PEF source links to Telegram...")
-                send_telegram_message(pef_links_message, target="pef")
+            pef_delivery_complete = False
+            if briefing_generation_succeeded(briefing_pef):
+                pef_sent = send_telegram_message(briefing_pef, target="pef")
+                pef_links_sent = not pef_links_message
+                if pef_sent and pef_links_message:
+                    logging.info("9. Sending PEF source links to Telegram...")
+                    pef_links_sent = send_telegram_message(pef_links_message, target="pef")
+                pef_delivery_complete = pef_sent and pef_links_sent
+            else:
+                logging.error("   Skipping PEF Telegram send because briefing generation failed.")
+
+            pending_pef_delivery = pending_firm_mentions + pending_pef
+            if pef_delivery_complete:
+                pending_to_commit.extend(pending_pef_delivery)
+            elif pending_pef_delivery:
+                logging.warning(
+                    f"   [News History] PEF delivery incomplete; "
+                    f"{len(pending_pef_delivery)} article(s) remain uncommitted for retry."
+                )
         else:
             logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")
+            if pending_firm_mentions or pending_pef:
+                logging.warning(
+                    "   [News History] PEF channel is not configured; collected PEF articles "
+                    "remain uncommitted."
+                )
 
-    if save_history_after_run:
-        save_news_history(news_history)
+    if save_history_after_run and pending_to_commit:
+        committed_count = commit_pending_articles(news_history, pending_to_commit)
+        if committed_count:
+            logging.info(
+                f"   [News History] Committed {committed_count} article(s) after successful delivery."
+            )
+            save_news_history(news_history)
 
 if __name__ == "__main__":
     main()
