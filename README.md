@@ -12,7 +12,8 @@
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
 - **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
 - **Baikal 언급 뉴스 레이더**: `PEF_FIRM_NAME`으로 지정한 운용사명이 직접 언급된 최신 뉴스를 별도 수집하고, 기사에 등장한 회사/기관/인물을 요약합니다.
-- **채권 발행시장**: PEF 채널에 DART 채무증권 공시의 당일·근접 수요예측 일정과 금융투자협회 채권정보센터의 당일 발행 종목을 별도 섹션으로 제공합니다. 파생결합증권·사모·메자닌은 기본 제외하며, 조회 결과 없음과 수집 장애를 구분합니다.
+- **채권 발행시장**: PEF 채널에 DART 채무증권 공시와 NH Syndication 발행예정표 PDF의 당일·근접 수요예측 일정, 금융투자협회 채권정보센터의 당일 발행 종목을 제공합니다. DART와 PDF의 동일 일정은 DART를 우선하며, 파생결합증권·사모·CB·BW·EB는 발행 합계에서 제외합니다.
+- **채널별 실행 시각**: 일반 뉴스 브리핑은 즉시 생성·전송한 뒤, 프로세스가 기본 `08:10`까지 대기하고 PEF 뉴스와 채권 자료를 새로 수집합니다.
 - **중복 뉴스 방지**: 같은 링크/제목뿐 아니라 유사 제목의 동일 사건도 제거합니다. 기사는 Telegram 본문과 링크 전송이 모두 성공한 뒤에만 히스토리에 기록됩니다.
 - **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
 - **주말 수익률**: 토·일요일 브리핑은 전일 등락률이 아닌 약 1주 전 최근 거래일 대비 주간 등락률을 사용합니다.
@@ -64,6 +65,9 @@ PEF_FIRM_NAME=Baikal Investment
 PEF_FIRM_NEWS_LOOKBACK_DAYS=30
 # 쉼표로 구분해 회사명 검색어를 직접 지정할 수 있음
 PEF_FIRM_NEWS_QUERIES=바이칼인베스트먼트,바이칼 인베스트먼트,Baikal Investment
+# 일반 브리핑 전송 후 PEF 수집을 시작할 서버 현지 시각
+PEF_WAIT_ENABLED=true
+PEF_START_TIME=08:10
 
 # PEF 채권 발행시장 (선택 사항, 아래 값이 기본값)
 BOND_MARKET_ENABLED=true
@@ -72,6 +76,8 @@ BOND_DART_LOOKAHEAD_DAYS=14
 BOND_DART_MAX_CANDIDATES=16
 BOND_DART_MAX_UPCOMING=5
 BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY=8
+NH_PDF_TIMEOUT_SECONDS=90
+NH_PDF_LOOKBACK_DAYS=3
 
 # 중복 뉴스 방지 히스토리 (선택 사항)
 NEWS_HISTORY_ENABLED=true
@@ -115,6 +121,7 @@ python main.py test
 ```
 `test` 또는 `--test` 모드에서는 기존 히스토리를 읽어 중복 여부는 확인하지만, 새로 수집한 뉴스는 히스토리에 저장하지 않습니다. 실전 모드에서도 Telegram 전송이 완료되지 않은 기사는 저장하지 않아 다음 실행에서 재시도합니다.
 링크 기준 중복은 `NEWS_HISTORY_RETENTION_DAYS` 동안 유지되고, 제목 기준 중복은 반복 제목 오탐을 줄이기 위해 `NEWS_HISTORY_TITLE_MATCH_DAYS` 동안만 적용됩니다.
+`test`, `--test`, `--date` 실행에서는 PEF 시작 시각 대기를 건너뜁니다.
 
 ### 중복 뉴스 히스토리 비활성화
 특정 실행에서만 이전 수집 이력을 무시하려면 아래 옵션을 사용하세요.

@@ -1,5 +1,5 @@
 import unittest
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -103,6 +103,7 @@ class HistoryTransactionTests(unittest.TestCase):
     @patch.dict("os.environ", {"TELEGRAM_PEF_CHANNEL_ID": "@pef"}, clear=False)
     @patch("main.setup_logging")
     @patch("main.check_holidays", return_value=(False, False, None, None))
+    @patch("main.wait_until_pef_start")
     @patch("main.save_news_history")
     @patch("main.send_telegram_message", side_effect=[True, True, False])
     @patch("main.generate_briefing", side_effect=["<b>general</b>", "<b>pef</b>"])
@@ -122,6 +123,7 @@ class HistoryTransactionTests(unittest.TestCase):
         _mock_generate,
         _mock_send,
         mock_save,
+        _mock_wait,
         _mock_holidays,
         _mock_logging,
     ):
@@ -153,6 +155,38 @@ class HistoryTransactionTests(unittest.TestCase):
 
         self.assertEqual([item["target"] for item in history["articles"]], ["general"])
         mock_save.assert_called_once_with(history)
+
+
+class PefScheduleTests(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {"PEF_WAIT_ENABLED": "true", "PEF_START_TIME": "08:10"},
+        clear=False,
+    )
+    def test_waits_until_configured_pef_start_time(self):
+        sleeper = Mock()
+
+        waited = main.wait_until_pef_start(
+            date(2026, 7, 24),
+            now=datetime(2026, 7, 24, 7, 40),
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(waited, 30 * 60)
+        sleeper.assert_called_once_with(30 * 60)
+
+    def test_test_mode_skips_wait(self):
+        sleeper = Mock()
+
+        waited = main.wait_until_pef_start(
+            date(2026, 7, 24),
+            test_mode=True,
+            now=datetime(2026, 7, 24, 7, 40),
+            sleeper=sleeper,
+        )
+
+        self.assertEqual(waited, 0)
+        sleeper.assert_not_called()
 
 
 class FetchStatusTests(unittest.TestCase):
@@ -304,9 +338,14 @@ class BondMarketTests(unittest.TestCase):
         <val6>50</val6><val9>5.7</val9></BISComDspDatDTO>
         <BISComDspDatDTO><val1>하나증권(DLB)2800</val1><val3>20260723</val3>
         <val6>100</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>베뉴지 2EB</val1><val3>20260723</val3>
+        <val6>376.2</val6><val9>-</val9></BISComDspDatDTO>
         </message></root>""".encode("utf-8")
 
-        records = main.parse_kofia_issuance_response(xml)
+        records, excluded_counts = main.parse_kofia_issuance_response(
+            xml,
+            include_exclusions=True,
+        )
         categories, total = main.aggregate_kofia_issuance(records)
 
         self.assertEqual(len(records), 3)
@@ -316,6 +355,94 @@ class BondMarketTests(unittest.TestCase):
             {"국가철도공단", "한국장학재단"},
         )
         self.assertEqual(categories["여전채"][0]["issuer"], "삼성카드")
+        self.assertEqual(excluded_counts["mezzanine"], 1)
+
+    def test_parses_nh_syndication_schedule_rows(self):
+        pdf_text = """
+하나에프앤아이  A+  1.5  300  1,500  3,000  NH/KB/한투/신한  개별 -30~+30  7/27(월)  8/4(화)
+                          2  700
+                          3  500
+메리츠금융지주  AA0  2  800  1,500  2,800  NH/KB/한투/신한  개별 -30~+30  7/29(수)  8/6(목)
+                          3  700
+"""
+        events = main.parse_nh_syndication_text(
+            pdf_text,
+            reference_date=date(2026, 7, 24),
+            pdf_url="https://example.com/nh.pdf",
+        )
+
+        self.assertEqual(len(events), 2)
+        hana, meritz = events
+        self.assertEqual(hana["issuer"], "하나에프앤아이")
+        self.assertEqual(hana["term"], "1.5/2/3년")
+        self.assertEqual(hana["amount_eok"], 1500)
+        self.assertEqual(hana["max_amount_eok"], 3000)
+        self.assertEqual(hana["demand_date"], date(2026, 7, 27))
+        self.assertEqual(meritz["issuer"], "메리츠금융지주")
+        self.assertEqual(meritz["rating"], "AA0")
+        self.assertEqual(meritz["amount_eok"], 1500)
+        self.assertEqual(meritz["max_amount_eok"], 2800)
+
+    def test_dart_event_wins_over_matching_nh_schedule(self):
+        dart_event = {
+            "source": "dart",
+            "issuer": "하나에프앤아이",
+            "demand_date": date(2026, 7, 27),
+            "amount_eok": 1500,
+            "report_url": "https://dart.example/hana",
+        }
+        nh_event = {
+            "source": "nh_pdf",
+            "issuer": "하나에프앤아이",
+            "demand_date": date(2026, 7, 27),
+            "amount_eok": 1400,
+            "max_amount_eok": 3000,
+            "report_url": "https://nh.example/list.pdf",
+        }
+
+        merged = main.merge_bond_demand_events([dart_event], [nh_event])
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source"], "dart")
+        self.assertEqual(merged[0]["amount_eok"], 1500)
+        self.assertEqual(merged[0]["max_amount_eok"], 3000)
+        self.assertEqual(merged[0]["report_url"], "https://dart.example/hana")
+
+    def test_section_includes_nh_only_upcoming_schedule(self):
+        section = main.build_bond_market_section(
+            {
+                "enabled": True,
+                "reference_date": date(2026, 7, 24),
+                "dart": {"status": "empty", "items": []},
+                "nh": {
+                    "status": "ok",
+                    "items": [{
+                        "source": "nh_pdf",
+                        "issuer": "메리츠금융지주",
+                        "rating": "AA0",
+                        "term": "2/3년",
+                        "amount_eok": 1500,
+                        "max_amount_eok": 2800,
+                        "demand_date": date(2026, 7, 29),
+                        "payment_date": date(2026, 8, 6),
+                        "report_url": "https://example.com/nh.pdf",
+                    }],
+                    "pdf_url": "https://example.com/nh.pdf",
+                },
+                "kofia": {
+                    "status": "empty",
+                    "items": [],
+                    "categories": {},
+                    "excluded_counts": {"mezzanine": 1},
+                },
+            }
+        )
+
+        self.assertIn("메리츠금융지주", section)
+        self.assertIn("(NH 예정)", section)
+        self.assertIn("최대 2,800억원", section)
+        self.assertIn("메자닌(CB·BW·EB) 1건", section)
+        self.assertNotIn("베뉴지", section)
 
     def test_section_distinguishes_empty_data_from_collection_error(self):
         section = main.build_bond_market_section(
