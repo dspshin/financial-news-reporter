@@ -1,6 +1,10 @@
 import os
 import sys
+import smtplib
+import ssl
 from io import BytesIO
+from email.message import EmailMessage
+from email.utils import formataddr, formatdate, make_msgid
 import requests
 import yfinance as yf
 import feedparser
@@ -889,7 +893,10 @@ def convert_html_to_plain_text(message):
     """
     Convert a Telegram HTML message into plain text while preserving links.
     """
-    anchor_pattern = re.compile(r"<a\s+href=(['\"])(.*?)\1>(.*?)</a>", re.IGNORECASE | re.DOTALL)
+    anchor_pattern = re.compile(
+        r"<a\b[^>]*\bhref=(['\"])(.*?)\1[^>]*>(.*?)</a>",
+        re.IGNORECASE | re.DOTALL,
+    )
 
     def replace_anchor(match):
         url = html.unescape(match.group(2).strip())
@@ -3231,6 +3238,304 @@ def redact_sensitive_text(value, *secrets):
     return re.sub(r"/bot[^/\s]+/", "/bot<redacted>/", redacted)
 
 
+def parse_email_recipients(value):
+    recipients = []
+    seen = set()
+    for item in re.split(r"[,;]", value or ""):
+        address = item.strip()
+        if not address:
+            continue
+        if "\r" in address or "\n" in address:
+            logging.warning("   [Email] Ignoring a recipient containing a line break.")
+            continue
+        key = address.lower()
+        if key not in seen:
+            seen.add(key)
+            recipients.append(address)
+    return recipients
+
+
+def get_email_recipients(target="general"):
+    target_key = "EMAIL_PEF_TO" if target == "pef" else "EMAIL_GENERAL_TO"
+    return parse_email_recipients(os.getenv(target_key) or os.getenv("EMAIL_TO", ""))
+
+
+def email_delivery_enabled():
+    return parse_bool_env("EMAIL_ENABLED", False)
+
+
+def email_target_enabled(target="general"):
+    return email_delivery_enabled() and bool(get_email_recipients(target))
+
+
+def get_email_security_mode():
+    configured_mode = os.getenv("SMTP_SECURITY", "").strip().lower()
+    aliases = {
+        "starttls": "starttls",
+        "tls": "starttls",
+        "ssl": "ssl",
+        "smtps": "ssl",
+        "none": "none",
+        "plain": "none",
+    }
+    if configured_mode:
+        return aliases.get(configured_mode)
+    if parse_bool_env("SMTP_USE_SSL", False):
+        return "ssl"
+    return "starttls" if parse_bool_env("SMTP_USE_TLS", True) else "none"
+
+
+def build_email_subject(target="general", briefing_date=None):
+    reference_date = briefing_date or datetime.now().date()
+    weekday = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[
+        reference_date.weekday()
+    ]
+    if target == "pef":
+        label = f"{os.getenv('PEF_FIRM_NAME', 'Baikal Investment')} GP 브리핑"
+    else:
+        label = "데일리 경제 브리핑"
+
+    prefix = re.sub(r"[\r\n]+", " ", os.getenv("EMAIL_SUBJECT_PREFIX", "")).strip()
+    subject = f"{reference_date:%m/%d}({weekday}) {label}"
+    return f"{prefix} {subject}".strip()
+
+
+def sanitize_email_html_line(line):
+    soup = BeautifulSoup(sanitize_telegram_html(line), "html.parser")
+    allowed_tags = {"a", "b", "strong", "i", "em", "u", "s", "code"}
+
+    for tag in list(soup.find_all(True)):
+        if tag.name in {"script", "style", "iframe", "object"}:
+            tag.decompose()
+            continue
+        if tag.name not in allowed_tags:
+            tag.unwrap()
+            continue
+        if tag.name == "a":
+            href = html.unescape((tag.get("href") or "").strip())
+            if not re.match(r"^https?://", href, flags=re.IGNORECASE):
+                tag.unwrap()
+                continue
+            tag.attrs = {
+                "href": href,
+                "style": "color:#0b6b62;text-decoration:underline;",
+            }
+        else:
+            tag.attrs = {}
+
+    return str(soup)
+
+
+def build_email_html(message, target="general"):
+    content_blocks = []
+    for raw_line in message.splitlines():
+        stripped_line = raw_line.strip()
+        if stripped_line == "---":
+            content_blocks.append(
+                '<hr style="border:0;border-top:1px solid #d9e2df;'
+                'margin:22px 0;">'
+            )
+        elif not stripped_line:
+            content_blocks.append('<div style="height:10px;line-height:10px;">&nbsp;</div>')
+        else:
+            safe_line = sanitize_email_html_line(raw_line)
+            content_blocks.append(
+                f'<div style="margin:0 0 5px;line-height:1.65;">{safe_line}</div>'
+            )
+
+    channel_label = "PEF GP Briefing" if target == "pef" else "Market Briefing"
+    content_html = "\n".join(content_blocks)
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#eef3f1;color:#172523;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+         style="width:100%;background:#eef3f1;">
+    <tr>
+      <td align="center" style="padding:28px 12px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0"
+               style="width:100%;max-width:760px;background:#ffffff;border:1px solid #d9e2df;
+                      border-radius:12px;">
+          <tr>
+            <td style="padding:15px 24px;background:#123c38;color:#ffffff;
+                       border-radius:12px 12px 0 0;font-family:Arial,sans-serif;
+                       font-size:12px;font-weight:bold;letter-spacing:1.2px;">
+              {channel_label}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:26px 24px 30px;font-family:Arial,'Malgun Gothic',sans-serif;
+                       font-size:15px;line-height:1.65;color:#172523;">
+              {content_html}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:14px 24px;border-top:1px solid #e6ecea;
+                       font-family:Arial,'Malgun Gothic',sans-serif;font-size:11px;
+                       line-height:1.5;color:#667572;">
+              이 메일은 자동 생성된 브리핑입니다.
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
+def build_email_plain_text(message):
+    safe_lines = []
+    for raw_line in message.splitlines():
+        if raw_line.strip() == "---":
+            safe_lines.append("---")
+            continue
+        safe_line = sanitize_email_html_line(raw_line)
+        safe_lines.append(convert_html_to_plain_text(safe_line))
+    return "\n".join(safe_lines).strip()
+
+
+def build_email_message(message, target="general", briefing_date=None):
+    recipients = get_email_recipients(target)
+    sender_address = (
+        os.getenv("EMAIL_FROM", "").strip()
+        or os.getenv("SMTP_USERNAME", "").strip()
+    )
+    if not recipients:
+        raise ValueError(f"No email recipients configured for target '{target}'")
+    if not sender_address:
+        raise ValueError("EMAIL_FROM or SMTP_USERNAME must be configured")
+    if "\r" in sender_address or "\n" in sender_address:
+        raise ValueError("EMAIL_FROM contains an invalid line break")
+
+    sender_name = re.sub(
+        r"[\r\n]+",
+        " ",
+        os.getenv("EMAIL_FROM_NAME", "Financial News Briefing"),
+    ).strip()
+    email_message = EmailMessage()
+    email_message["Subject"] = build_email_subject(target, briefing_date)
+    email_message["From"] = (
+        formataddr((sender_name, sender_address)) if sender_name else sender_address
+    )
+    email_message["To"] = ", ".join(recipients)
+    email_message["Date"] = formatdate(localtime=True)
+    email_message["Message-ID"] = make_msgid()
+    email_message.set_content(build_email_plain_text(message), charset="utf-8")
+    email_message.add_alternative(
+        build_email_html(message, target=target),
+        subtype="html",
+        charset="utf-8",
+    )
+    return email_message, sender_address, recipients
+
+
+def send_email_message(message, target="general", briefing_date=None):
+    """
+    Send a multipart plain-text/HTML briefing through a configurable SMTP server.
+    """
+    if not email_target_enabled(target):
+        return False
+
+    smtp_host = os.getenv("SMTP_HOST", "").strip()
+    security_mode = get_email_security_mode()
+    if not smtp_host:
+        logging.error("   [Email] SMTP_HOST is not configured.")
+        return False
+    if security_mode is None:
+        logging.error(
+            "   [Email] SMTP_SECURITY must be one of starttls, ssl, or none."
+        )
+        return False
+
+    default_port = 465 if security_mode == "ssl" else 587
+    smtp_port = parse_int_env("SMTP_PORT", default_port)
+    timeout_seconds = max(1, parse_int_env("EMAIL_TIMEOUT_SECONDS", 30))
+    max_attempts = max(1, parse_int_env("EMAIL_MAX_ATTEMPTS", 2))
+    retry_delay = max(0, parse_int_env("EMAIL_RETRY_DELAY_SECONDS", 5))
+    username = os.getenv("SMTP_USERNAME", "").strip()
+    password = os.getenv("SMTP_PASSWORD", "")
+
+    if bool(username) != bool(password):
+        logging.error(
+            "   [Email] SMTP_USERNAME and SMTP_PASSWORD must both be configured "
+            "when SMTP authentication is used."
+        )
+        return False
+
+    try:
+        email_message, sender_address, recipients = build_email_message(
+            message,
+            target=target,
+            briefing_date=briefing_date,
+        )
+    except ValueError as error:
+        logging.error(f"   [Email] Configuration error: {error}")
+        return False
+
+    tls_context = ssl.create_default_context()
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if security_mode == "ssl":
+                smtp_client = smtplib.SMTP_SSL(
+                    smtp_host,
+                    smtp_port,
+                    timeout=timeout_seconds,
+                    context=tls_context,
+                )
+            else:
+                smtp_client = smtplib.SMTP(
+                    smtp_host,
+                    smtp_port,
+                    timeout=timeout_seconds,
+                )
+
+            with smtp_client as server:
+                server.ehlo()
+                if security_mode == "starttls":
+                    server.starttls(context=tls_context)
+                    server.ehlo()
+                if username:
+                    server.login(username, password)
+                refused = server.send_message(
+                    email_message,
+                    from_addr=sender_address,
+                    to_addrs=recipients,
+                )
+                if refused:
+                    raise smtplib.SMTPRecipientsRefused(refused)
+
+            logging.info(
+                f"Email sent successfully for target='{target}' "
+                f"to {len(recipients)} recipient(s)."
+            )
+            return True
+        except Exception as error:
+            safe_error = redact_sensitive_text(
+                error,
+                password,
+                username,
+                sender_address,
+                *recipients,
+            )
+            if attempt < max_attempts:
+                logging.warning(
+                    f"   [Email] Send failed (attempt {attempt}/{max_attempts}): "
+                    f"{safe_error}. Retrying in {retry_delay} seconds..."
+                )
+                if retry_delay:
+                    time.sleep(retry_delay)
+            else:
+                logging.error(
+                    f"   [Email] Send failed after {max_attempts} attempt(s): "
+                    f"{safe_error}"
+                )
+    return False
+
+
 def send_telegram_message(message, target="general"):
     """
     Sends a message to a Telegram channel.
@@ -3411,10 +3716,21 @@ def main():
     # Skip if 'test' in args
     if test_mode:
          logging.info("4. Sending General Briefing to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("   Sending General Briefing by Email... [SKIPPED] (Test Mode)")
     else:
         logging.info("4. Sending General Briefing to Telegram...")
         if briefing_generation_succeeded(briefing_general):
             general_sent = send_telegram_message(briefing_general, target="general")
+            if email_target_enabled("general"):
+                logging.info("   Sending General Briefing by Email...")
+                if not send_email_message(
+                    briefing_general,
+                    target="general",
+                    briefing_date=today,
+                ):
+                    logging.warning(
+                        "   [Email] General briefing email delivery was not completed."
+                    )
             if general_sent:
                 pending_to_commit.extend(pending_general)
             elif pending_general:
@@ -3519,6 +3835,7 @@ def main():
     # 11. Send PEF Briefing to Telegram
     if test_mode:
          logging.info("9. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("   Sending PEF Briefing by Email... [SKIPPED] (Test Mode)")
     else:
         logging.info("9. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
@@ -3547,6 +3864,27 @@ def main():
                 logging.warning(
                     "   [News History] PEF channel is not configured; collected PEF articles "
                     "remain uncommitted."
+                )
+
+        if email_target_enabled("pef"):
+            if briefing_generation_succeeded(briefing_pef):
+                pef_email_content = briefing_pef
+                if pef_links_message:
+                    pef_email_content = (
+                        f"{pef_email_content.rstrip()}\n\n---\n\n{pef_links_message}"
+                    )
+                logging.info("   Sending PEF Briefing by Email...")
+                if not send_email_message(
+                    pef_email_content,
+                    target="pef",
+                    briefing_date=today,
+                ):
+                    logging.warning(
+                        "   [Email] PEF briefing email delivery was not completed."
+                    )
+            else:
+                logging.error(
+                    "   Skipping PEF email send because briefing generation failed."
                 )
 
     if save_history_after_run:

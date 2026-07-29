@@ -100,12 +100,22 @@ class HistoryTransactionTests(unittest.TestCase):
         self.assertEqual(committed, 1)
         self.assertEqual(len(history["articles"]), 1)
 
-    @patch.dict("os.environ", {"TELEGRAM_PEF_CHANNEL_ID": "@pef"}, clear=False)
+    @patch.dict(
+        "os.environ",
+        {
+            "TELEGRAM_PEF_CHANNEL_ID": "@pef",
+            "EMAIL_ENABLED": "true",
+            "EMAIL_GENERAL_TO": "general@example.com",
+            "EMAIL_PEF_TO": "pef@example.com",
+        },
+        clear=False,
+    )
     @patch("main.setup_logging")
     @patch("main.check_holidays", return_value=(False, False, None, None))
     @patch("main.wait_until_pef_start")
     @patch("main.save_news_history")
-    @patch("main.send_telegram_message", side_effect=[True, True, False])
+    @patch("main.send_email_message")
+    @patch("main.send_telegram_message")
     @patch("main.generate_briefing", side_effect=["<b>general</b>", "<b>pef</b>"])
     @patch("main.fetch_bond_market_data", return_value={"enabled": False})
     @patch("main.fetch_firm_mention_news")
@@ -121,7 +131,8 @@ class HistoryTransactionTests(unittest.TestCase):
         mock_fetch_firm,
         _mock_bond_market,
         _mock_generate,
-        _mock_send,
+        mock_send_telegram,
+        mock_send_email,
         mock_save,
         _mock_wait,
         _mock_holidays,
@@ -150,11 +161,143 @@ class HistoryTransactionTests(unittest.TestCase):
             ("pef context", [("PEF deal", "https://example.com/pef")], set(), pef_pending, success_status),
         ]
         mock_fetch_firm.return_value = ("", [], set(), [], success_status)
+        delivery_order = []
+        telegram_results = iter([True, True, False])
+
+        def send_telegram(_message, target="general"):
+            delivery_order.append(("telegram", target))
+            return next(telegram_results)
+
+        def send_email(_message, target="general", briefing_date=None):
+            delivery_order.append(("email", target))
+            return True
+
+        mock_send_telegram.side_effect = send_telegram
+        mock_send_email.side_effect = send_email
 
         main.main()
 
         self.assertEqual([item["target"] for item in history["articles"]], ["general"])
         mock_save.assert_called_once_with(history)
+        self.assertEqual(
+            delivery_order,
+            [
+                ("telegram", "general"),
+                ("email", "general"),
+                ("telegram", "pef"),
+                ("telegram", "pef"),
+                ("email", "pef"),
+            ],
+        )
+        pef_email_body = mock_send_email.call_args_list[1].args[0]
+        self.assertIn("PEF deal", pef_email_body)
+
+
+class EmailNotifierTests(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {
+            "EMAIL_ENABLED": "true",
+            "SMTP_HOST": "smtp.example.com",
+            "SMTP_PORT": "587",
+            "SMTP_SECURITY": "starttls",
+            "SMTP_USERNAME": "sender@example.com",
+            "SMTP_PASSWORD": "test-password",
+            "EMAIL_FROM": "sender@example.com",
+            "EMAIL_FROM_NAME": "Briefing Bot",
+            "EMAIL_GENERAL_TO": "alpha@example.com; beta@example.com",
+            "EMAIL_SUBJECT_PREFIX": "[Daily]",
+            "EMAIL_MAX_ATTEMPTS": "1",
+        },
+        clear=True,
+    )
+    @patch("main.ssl.create_default_context")
+    @patch("main.smtplib.SMTP")
+    def test_sends_multipart_html_email_with_starttls(
+        self,
+        mock_smtp,
+        mock_create_context,
+    ):
+        server = mock_smtp.return_value.__enter__.return_value
+        server.send_message.return_value = {}
+
+        sent = main.send_email_message(
+            (
+                "<b>브리핑 제목</b>\n\n"
+                "- 핵심 내용\n"
+                "<a href='https://example.com/news'>뉴스 링크</a>\n"
+                "<script>unsafe()</script>"
+            ),
+            target="general",
+            briefing_date=date(2026, 7, 29),
+        )
+
+        self.assertTrue(sent)
+        mock_smtp.assert_called_once_with(
+            "smtp.example.com",
+            587,
+            timeout=30,
+        )
+        server.starttls.assert_called_once_with(
+            context=mock_create_context.return_value
+        )
+        server.login.assert_called_once_with("sender@example.com", "test-password")
+        email_message = server.send_message.call_args.args[0]
+        self.assertEqual(
+            email_message["Subject"],
+            "[Daily] 07/29(Wed) 데일리 경제 브리핑",
+        )
+        self.assertEqual(
+            email_message["To"],
+            "alpha@example.com, beta@example.com",
+        )
+        self.assertTrue(email_message.is_multipart())
+        plain_body = email_message.get_body(preferencelist=("plain",)).get_content()
+        html_body = email_message.get_body(preferencelist=("html",)).get_content()
+        self.assertIn("뉴스 링크 (https://example.com/news)", plain_body)
+        self.assertNotIn("unsafe()", plain_body)
+        self.assertIn("<b>브리핑 제목</b>", html_body)
+        self.assertIn('href="https://example.com/news"', html_body)
+        self.assertNotIn("<script>", html_body)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "EMAIL_ENABLED": "false",
+            "SMTP_HOST": "smtp.example.com",
+            "EMAIL_GENERAL_TO": "alpha@example.com",
+        },
+        clear=True,
+    )
+    @patch("main.smtplib.SMTP")
+    def test_disabled_email_does_not_open_smtp_connection(self, mock_smtp):
+        self.assertFalse(main.send_email_message("<b>briefing</b>"))
+        mock_smtp.assert_not_called()
+
+    @patch.dict(
+        "os.environ",
+        {
+            "EMAIL_ENABLED": "true",
+            "EMAIL_TO": "",
+            "EMAIL_GENERAL_TO": "",
+            "EMAIL_PEF_TO": "pef@example.com",
+        },
+        clear=True,
+    )
+    @patch("main.smtplib.SMTP")
+    @patch("main.smtplib.SMTP_SSL")
+    def test_empty_general_recipients_skip_without_smtp_or_error(
+        self,
+        mock_smtp_ssl,
+        mock_smtp,
+    ):
+        self.assertFalse(main.email_target_enabled("general"))
+        self.assertTrue(main.email_target_enabled("pef"))
+        self.assertFalse(
+            main.send_email_message("<b>general briefing</b>", target="general")
+        )
+        mock_smtp.assert_not_called()
+        mock_smtp_ssl.assert_not_called()
 
 
 class PefScheduleTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 # Financial News & Market Outlook Briefing Service
 
-이 프로젝트는 주요 시장 지수와 경제 뉴스를 자동으로 수집하고, Google Gemini AI를 활용하여 전문적인 시장 전망 보고서를 생성한 후 Telegram 채널로 전송하는 자동화 도구입니다.
+이 프로젝트는 주요 시장 지수와 경제 뉴스를 자동으로 수집하고, Google Gemini AI를 활용하여 전문적인 시장 전망 보고서를 생성한 후 Telegram 채널과 HTML 이메일로 전송하는 자동화 도구입니다.
 
 ## 🚀 주요 기능
 
@@ -19,6 +19,7 @@
 - **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
 - **주말 수익률**: 토·일요일 브리핑은 전일 등락률이 아닌 약 1주 전 최근 거래일 대비 주간 등락률을 사용합니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
+- **HTML 이메일 배포**: Telegram 전송 시도 후 일반/PEF 수신자 그룹에 브리핑을 multipart HTML 이메일로 별도 배포합니다. PEF 이메일에는 관련 뉴스 링크도 한 통에 포함됩니다.
 - **휴장일 자동 감지**:
     - **한국 증시 휴장일**: "오늘의 증시 전망" 대신 글로벌 시황 위주의 리포트 작성
     - **미국 증시 휴장일**: 전일 마감 데이터 부재 시 일반 미국 경제 뉴스 위주 분석
@@ -29,6 +30,7 @@
 - Python 3.9 이상
 - Google Gemini API Key
 - Telegram Bot Token & Channel ID
+- 이메일 배포 사용 시 SMTP 계정 또는 사내 SMTP 릴레이
 
 Python 3.9에서는 해당 버전을 지원하는 `google-genai 1.47.0`이 설치되고,
 Python 3.10 이상에서는 `google-genai 2.13.0`이 설치됩니다.
@@ -60,6 +62,28 @@ TELEGRAM_CHANNEL_ID=your_channel_id_here
 # TELEGRAM_PEF_BOT_TOKEN 미설정 시 기본 TELEGRAM_BOT_TOKEN 사용
 TELEGRAM_PEF_BOT_TOKEN=your_pef_bot_token_here
 TELEGRAM_PEF_CHANNEL_ID=your_pef_channel_id_here
+
+# HTML 이메일 배포 (선택 사항)
+# Telegram 전송 시도 후 같은 브리핑을 이메일로 별도 전송
+EMAIL_ENABLED=false
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+# starttls, ssl, none 중 하나
+SMTP_SECURITY=starttls
+SMTP_USERNAME=sender@example.com
+SMTP_PASSWORD=your_smtp_or_app_password
+EMAIL_FROM=sender@example.com
+EMAIL_FROM_NAME=Financial News Briefing
+# 여러 주소는 쉼표 또는 세미콜론으로 구분
+# EMAIL_TO는 채널별 주소가 없을 때 사용하는 공통 수신자
+# 채널별 주소와 EMAIL_TO가 모두 비어 있으면 해당 이메일은 오류 없이 생략
+EMAIL_TO=
+EMAIL_GENERAL_TO=general-reader@example.com
+EMAIL_PEF_TO=pef-reader@example.com
+EMAIL_SUBJECT_PREFIX=
+EMAIL_TIMEOUT_SECONDS=30
+EMAIL_MAX_ATTEMPTS=2
+EMAIL_RETRY_DELAY_SECONDS=5
 
 # PEF 브리핑 개인화 (선택 사항)
 PEF_FIRM_NAME=Baikal Investment
@@ -95,7 +119,7 @@ NEWS_HISTORY_TITLE_MATCH_DAYS=7
 ## 📖 사용 방법 (Usage)
 
 ### 기본 실행
-브리핑을 생성하고 텔레그램으로 전송합니다.
+브리핑을 생성하고 Telegram 및 활성화된 이메일 수신자에게 전송합니다.
 ```bash
 python main.py
 ```
@@ -109,7 +133,7 @@ python main.py --mode saturday
 # 일요일 로직 (주간 정리 & 다음주 전망)
 python main.py --mode sunday
 
-# 테스트 모드와 함께 사용 (텔레그램 전송 생략)
+# 테스트 모드와 함께 사용 (Telegram 및 이메일 전송 생략)
 python main.py --mode sunday test
 ```
 
@@ -121,11 +145,11 @@ python main.py --date 2024-12-25 --test
 ```
 
 ### 테스트 모드 실행
-텔레그램 전송을 건너뛰고 콘솔에만 결과를 출력합니다.
+Telegram과 이메일 전송을 건너뛰고 콘솔에만 결과를 출력합니다.
 ```bash
 python main.py test
 ```
-`test` 또는 `--test` 모드에서는 기존 히스토리를 읽어 중복 여부는 확인하지만, 새로 수집한 뉴스는 히스토리에 저장하지 않습니다. 실전 모드에서도 Telegram 전송이 완료되지 않은 기사는 저장하지 않아 다음 실행에서 재시도합니다.
+`test` 또는 `--test` 모드에서는 기존 히스토리를 읽어 중복 여부는 확인하지만, 새로 수집한 뉴스는 히스토리에 저장하지 않습니다. 실전 모드에서도 Telegram 전송이 완료되지 않은 기사는 저장하지 않아 다음 실행에서 재시도합니다. 이메일은 Telegram의 대체 수단이 아닌 후속 독립 배포 채널이므로 이메일 실패는 이 히스토리 확정 기준을 바꾸지 않습니다.
 링크 기준 중복은 `NEWS_HISTORY_RETENTION_DAYS` 동안 유지되고, 제목 기준 중복은 반복 제목 오탐을 줄이기 위해 `NEWS_HISTORY_TITLE_MATCH_DAYS` 동안만 적용됩니다.
 `test`, `--test`, `--date` 실행에서는 PEF 시작 시각 대기를 건너뜁니다.
 
@@ -142,7 +166,7 @@ python list_models.py
 ```
 
 ## 📂 파일 구조
-- `main.py`: 메인 실행 파일 (데이터 수집, AI 분석, 텔레그램 전송)
+- `main.py`: 메인 실행 파일 (데이터 수집, AI 분석, Telegram/HTML 이메일 전송)
 - `list_models.py`: 사용 가능한 Gemini 모델 확인용 스크립트
 - `requirements.txt`: 필요한 Python 라이브러리 목록
 - `.env`: API 키 등 보안 정보 저장 (직접 생성 필요)
