@@ -12,7 +12,8 @@
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
 - **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
 - **Baikal 언급 뉴스 레이더**: `PEF_FIRM_NAME`으로 지정한 운용사명이 직접 언급된 최신 뉴스를 별도 수집하고, 기사에 등장한 회사/기관/인물을 요약합니다.
-- **채권 발행시장**: PEF 채널에 DART 채무증권 공시와 NH Syndication 발행예정표 PDF의 당일·근접 수요예측 일정, 금융투자협회 채권정보센터의 당일 발행 종목을 제공합니다. DART와 PDF의 동일 일정은 DART를 우선하며, 파생결합증권·사모·CB·BW·EB는 발행 합계에서 제외합니다.
+- **채권 발행시장**: PEF 채널에 DART, NH Syndication PDF, 금융투자협회 데이터를 NH 데일리 메일과 유사한 `금일 주요 발행 채권·주요 일정·발행 상세` 형식으로 제공합니다. 특수은행의 일상 발행, 유동화 SPC, 파생결합증권·사모·CB·BW·EB는 제외하고 발행액 미확인 공사채 등은 별도로 표시합니다.
+- **채권 데이터 폴링**: 평일 PEF 실행 후 NH 당일 PDF와 금투협 발행정보가 준비되지 않았으면 5분 간격으로 재조회하며, 늦어도 `09:00`에는 확보된 최신 자료로 브리핑을 생성합니다.
 - **채널별 실행 시각**: 일반 뉴스 브리핑은 즉시 생성·전송한 뒤, 프로세스가 기본 `08:10`까지 대기하고 PEF 뉴스와 채권 자료를 새로 수집합니다.
 - **중복 뉴스 방지**: 같은 링크/제목뿐 아니라 유사 제목의 동일 사건도 제거합니다. 기사는 Telegram 본문과 링크 전송이 모두 성공한 뒤에만 히스토리에 기록됩니다.
 - **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
@@ -71,13 +72,18 @@ PEF_START_TIME=08:10
 
 # PEF 채권 발행시장 (선택 사항, 아래 값이 기본값)
 BOND_MARKET_ENABLED=true
+BOND_POLL_ENABLED=true
+BOND_POLL_INTERVAL_SECONDS=300
+BOND_POLL_DEADLINE=09:00
 BOND_SOURCE_TIMEOUT_SECONDS=15
 BOND_DART_LOOKAHEAD_DAYS=14
 BOND_DART_MAX_CANDIDATES=16
 BOND_DART_MAX_UPCOMING=5
 BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY=8
+BOND_NH_MAX_DETAILS=4
 NH_PDF_TIMEOUT_SECONDS=90
 NH_PDF_LOOKBACK_DAYS=3
+NH_PDF_PLANNED_LOOKAHEAD_DAYS=45
 
 # 중복 뉴스 방지 히스토리 (선택 사항)
 NEWS_HISTORY_ENABLED=true

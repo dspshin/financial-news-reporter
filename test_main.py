@@ -1,5 +1,5 @@
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -290,7 +290,7 @@ class BondMarketTests(unittest.TestCase):
         overview_html = """
         <table>
           <tr><td>전자등록총액</td><td>80,000,000,000</td></tr>
-          <tr><td>평가결과등급</td><td>AA-(안정적)</td></tr>
+          <tr><td>평가결과등급</td><td>AA0(안정적)</td></tr>
           <tr><td>상 환 기 한</td><td>2028년 07월 30일</td></tr>
         </table>
         <p>본 사채는 2026년 07월 23일 09시에서 16시까지
@@ -302,7 +302,7 @@ class BondMarketTests(unittest.TestCase):
         -0.30%p. ~ +0.30%p.를 가산합니다.</p>
         <table>
           <tr><td>전자등록총액</td><td>120,000,000,000</td></tr>
-          <tr><td>평가결과등급</td><td>AA-(안정적)</td></tr>
+          <tr><td>평가결과등급</td><td>AA0(안정적)</td></tr>
           <tr><td>상 환 기 한</td><td>2029년 07월 30일</td></tr>
         </table>
         """
@@ -321,7 +321,7 @@ class BondMarketTests(unittest.TestCase):
         self.assertEqual(event["end_time"], "16:00")
         self.assertEqual(event["amount_eok"], 2000)
         self.assertEqual(event["max_amount_eok"], 4000)
-        self.assertEqual(event["rating"], "AA-")
+        self.assertEqual(event["rating"], "AA0")
         self.assertEqual(event["term"], "2년/3년")
         self.assertEqual(event["rate_band"], "개별민평 -30~+30bp")
 
@@ -340,11 +340,16 @@ class BondMarketTests(unittest.TestCase):
         <val6>100</val6><val9>-</val9></BISComDspDatDTO>
         <BISComDspDatDTO><val1>베뉴지 2EB</val1><val3>20260723</val3>
         <val6>376.2</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>한국철도공사284</val1><val3>20260723</val3>
+        <val6>0</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>졸스37</val1><val3>20260723</val3>
+        <val6>0</val6><val9>-</val9></BISComDspDatDTO>
         </message></root>""".encode("utf-8")
 
-        records, excluded_counts = main.parse_kofia_issuance_response(
+        records, pending_records, excluded_counts = main.parse_kofia_issuance_response(
             xml,
             include_exclusions=True,
+            include_pending=True,
         )
         categories, total = main.aggregate_kofia_issuance(records)
 
@@ -356,6 +361,36 @@ class BondMarketTests(unittest.TestCase):
         )
         self.assertEqual(categories["여전채"][0]["issuer"], "삼성카드")
         self.assertEqual(excluded_counts["mezzanine"], 1)
+        self.assertEqual(
+            [record["issuer"] for record in pending_records],
+            ["한국철도공사"],
+        )
+
+    def test_kofia_normalizes_tranches_and_policy_banks(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <root><message><proframeHeader><pfmResponseDtal/></proframeHeader>
+        <BISComDspDatDTO><val1>한국투자증권33-1</val1><val3>20260729</val3>
+        <val6>1500</val6></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>한국투자증권33-2</val1><val3>20260729</val3>
+        <val6>1500</val6></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>한국수출입금융 2607타-이표-2</val1>
+        <val3>20260729</val3><val6>2500</val6></BISComDspDatDTO>
+        </message></root>""".encode("utf-8")
+
+        records = main.parse_kofia_issuance_response(xml)
+        categories, _ = main.aggregate_kofia_issuance(records)
+
+        self.assertEqual(categories["회사채"][0]["issuer"], "한국투자증권")
+        self.assertEqual(categories["회사채"][0]["amount_eok"], 3000)
+        self.assertEqual(categories["은행채"], [])
+        self.assertEqual(
+            main.normalize_kofia_issuer("한국수출입금융 2607타-이표-2"),
+            "수출입은행",
+        )
+        self.assertEqual(
+            main.classify_kofia_bond("한국수출입금융 2607타-이표-2"),
+            "은행채",
+        )
 
     def test_parses_nh_syndication_schedule_rows(self):
         pdf_text = """
@@ -364,6 +399,7 @@ class BondMarketTests(unittest.TestCase):
                           3  500
 메리츠금융지주  AA0  2  800  1,500  2,800  NH/KB/한투/신한  개별 -30~+30  7/29(수)  8/6(목)
                           3  700
+교보생명보험(신종)  AA0  30NC5  금액 미정  4,000  NH/신한/한투  고정  미정  8/31(월)
 """
         events = main.parse_nh_syndication_text(
             pdf_text,
@@ -371,17 +407,31 @@ class BondMarketTests(unittest.TestCase):
             pdf_url="https://example.com/nh.pdf",
         )
 
-        self.assertEqual(len(events), 2)
-        hana, meritz = events
+        self.assertEqual(len(events), 3)
+        hana, meritz, kyobo = events
         self.assertEqual(hana["issuer"], "하나에프앤아이")
         self.assertEqual(hana["term"], "1.5/2/3년")
         self.assertEqual(hana["amount_eok"], 1500)
         self.assertEqual(hana["max_amount_eok"], 3000)
         self.assertEqual(hana["demand_date"], date(2026, 7, 27))
+        self.assertEqual(hana["managers"], ["NH", "KB", "한투", "신한"])
+        self.assertEqual(
+            hana["tranches"],
+            [
+                {"term": "1.5", "amount_eok": 300},
+                {"term": "2", "amount_eok": 700},
+                {"term": "3", "amount_eok": 500},
+            ],
+        )
         self.assertEqual(meritz["issuer"], "메리츠금융지주")
         self.assertEqual(meritz["rating"], "AA0")
         self.assertEqual(meritz["amount_eok"], 1500)
         self.assertEqual(meritz["max_amount_eok"], 2800)
+        self.assertIsNone(kyobo["amount_eok"])
+        self.assertEqual(kyobo["max_amount_eok"], 4000)
+        self.assertIsNone(kyobo["demand_date"])
+        self.assertEqual(kyobo["payment_date"], date(2026, 8, 31))
+        self.assertEqual(kyobo["rate_band"], "고정")
 
     def test_dart_event_wins_over_matching_nh_schedule(self):
         dart_event = {
@@ -408,14 +458,15 @@ class BondMarketTests(unittest.TestCase):
         self.assertEqual(merged[0]["max_amount_eok"], 3000)
         self.assertEqual(merged[0]["report_url"], "https://dart.example/hana")
 
-    def test_section_includes_nh_only_upcoming_schedule(self):
+    def test_section_uses_concise_nh_mail_format(self):
         section = main.build_bond_market_section(
             {
                 "enabled": True,
-                "reference_date": date(2026, 7, 24),
+                "reference_date": date(2026, 7, 29),
                 "dart": {"status": "empty", "items": []},
                 "nh": {
                     "status": "ok",
+                    "source_date": date(2026, 7, 29),
                     "items": [{
                         "source": "nh_pdf",
                         "issuer": "메리츠금융지주",
@@ -425,24 +476,47 @@ class BondMarketTests(unittest.TestCase):
                         "max_amount_eok": 2800,
                         "demand_date": date(2026, 7, 29),
                         "payment_date": date(2026, 8, 6),
+                        "managers": ["NH", "KB", "한투", "신한"],
+                        "tranches": [
+                            {"term": "2", "amount_eok": 800},
+                            {"term": "3", "amount_eok": 700},
+                        ],
+                        "rate_band": "개별 -30~+30bp",
                         "report_url": "https://example.com/nh.pdf",
                     }],
                     "pdf_url": "https://example.com/nh.pdf",
                 },
                 "kofia": {
-                    "status": "empty",
-                    "items": [],
-                    "categories": {},
-                    "excluded_counts": {"mezzanine": 1},
+                    "status": "ok",
+                    "items": [{"issuer": "현대캐피탈"}],
+                    "pending_items": [{"issuer": "한국철도공사"}],
+                    "categories": {
+                        "공사채": [],
+                        "은행채": [],
+                        "여전채": [{"issuer": "현대캐피탈", "amount_eok": 500}],
+                        "회사채": [{"issuer": "한국투자증권", "amount_eok": 3000}],
+                    },
+                    "pending_categories": {
+                        "공사채": ["한국철도공사"],
+                        "은행채": [],
+                        "여전채": [],
+                        "회사채": [],
+                    },
                 },
             }
         )
 
+        self.assertIn("[ 금일 주요 발행 채권 ]", section)
+        self.assertIn("지방채/공사채</b>: 한국철도공사", section)
+        self.assertIn("여전채</b>: 현대캐피탈", section)
+        self.assertIn("회사채</b>: 한국투자증권", section)
         self.assertIn("메리츠금융지주", section)
-        self.assertIn("(NH 예정)", section)
+        self.assertIn("[ 금일 주요 일정 ]", section)
         self.assertIn("최대 2,800억원", section)
-        self.assertIn("메자닌(CB·BW·EB) 1건", section)
-        self.assertNotIn("베뉴지", section)
+        self.assertIn("대표주관: NH / KB / 한투 / 신한", section)
+        self.assertIn("밴드: 개별 -30~+30bp", section)
+        self.assertNotIn("GP 체크", section)
+        self.assertNotIn("확인 발행액", section)
 
     def test_section_distinguishes_empty_data_from_collection_error(self):
         section = main.build_bond_market_section(
@@ -454,9 +528,97 @@ class BondMarketTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("확인된 신규 수요예측 일정이 없습니다", section)
-        self.assertIn("수집 실패로 금일 발행 여부를 판단할 수 없습니다", section)
-        self.assertNotIn("<b>공사채</b>", section)
+        self.assertIn("[ 금일 주요 일정 ]", section)
+        self.assertIn("- 없음", section)
+        self.assertIn("금투협 발행정보 수집 실패", section)
+        self.assertNotIn("GP 체크", section)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "BOND_POLL_ENABLED": "true",
+            "BOND_POLL_INTERVAL_SECONDS": "300",
+            "BOND_POLL_DEADLINE": "09:00",
+        },
+        clear=False,
+    )
+    def test_bond_sources_poll_every_five_minutes_until_ready(self):
+        class FakeClock:
+            def __init__(self):
+                self.current = datetime(2026, 7, 29, 8, 10)
+                self.sleeps = []
+
+            def now(self):
+                return self.current
+
+            def sleep(self, seconds):
+                self.sleeps.append(seconds)
+                self.current += timedelta(seconds=seconds)
+
+        clock = FakeClock()
+        dart_fetcher = Mock(return_value={"status": "ok", "items": []})
+        kofia_fetcher = Mock(side_effect=[
+            {"status": "empty", "items": [], "pending_items": []},
+            {"status": "empty", "items": [], "pending_items": []},
+            {"status": "ok", "items": [{"issuer": "현대캐피탈"}], "pending_items": []},
+        ])
+        nh_fetcher = Mock(side_effect=[
+            {"status": "unavailable", "items": [], "source_date": None},
+            {"status": "ok", "items": [], "source_date": date(2026, 7, 29)},
+            {"status": "ok", "items": [], "source_date": date(2026, 7, 29)},
+        ])
+
+        result = main.fetch_bond_market_data(
+            date(2026, 7, 29),
+            now_provider=clock.now,
+            sleeper=clock.sleep,
+            dart_fetcher=dart_fetcher,
+            kofia_fetcher=kofia_fetcher,
+            nh_fetcher=nh_fetcher,
+        )
+
+        self.assertEqual(result["poll_attempts"], 3)
+        self.assertEqual(clock.sleeps, [300, 300])
+        self.assertEqual(result["fetched_at"], datetime(2026, 7, 29, 8, 20))
+        dart_fetcher.assert_called_once_with(date(2026, 7, 29))
+
+    @patch.dict(
+        "os.environ",
+        {
+            "BOND_POLL_ENABLED": "true",
+            "BOND_POLL_INTERVAL_SECONDS": "300",
+            "BOND_POLL_DEADLINE": "09:00",
+        },
+        clear=False,
+    )
+    def test_bond_poll_stops_at_nine(self):
+        class FakeClock:
+            def __init__(self):
+                self.current = datetime(2026, 7, 29, 8, 55)
+
+            def now(self):
+                return self.current
+
+            def sleep(self, seconds):
+                self.current += timedelta(seconds=seconds)
+
+        clock = FakeClock()
+        result = main.fetch_bond_market_data(
+            date(2026, 7, 29),
+            now_provider=clock.now,
+            sleeper=clock.sleep,
+            dart_fetcher=Mock(return_value={"status": "empty", "items": []}),
+            kofia_fetcher=Mock(
+                return_value={"status": "empty", "items": [], "pending_items": []}
+            ),
+            nh_fetcher=Mock(
+                return_value={"status": "unavailable", "items": [], "source_date": None}
+            ),
+        )
+
+        self.assertEqual(result["poll_attempts"], 2)
+        self.assertTrue(result["deadline_reached"])
+        self.assertEqual(result["fetched_at"], datetime(2026, 7, 29, 9, 0))
 
 
 if __name__ == "__main__":

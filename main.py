@@ -157,6 +157,13 @@ KOFIA_STRUCTURED_BOND_KEYWORDS = (
 KOFIA_MEZZANINE_BOND_KEYWORDS = (
     "전환사채", "교환사채", "신주인수권부사채",
 )
+KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS = (
+    "유동화전문", "제일차", "제이차", "제삼차", "제사차", "제오차",
+    "제육차", "제칠차", "제팔차", "제구차", "제십차",
+)
+KOFIA_ROUTINE_POLICY_BANK_ISSUERS = {
+    "산업은행", "기업은행", "수출입은행", "농협은행",
+}
 
 PEF_DIRECT_KEYWORDS = [
     "pef", "private equity", "사모펀드", "사모투자", "바이아웃",
@@ -1144,7 +1151,7 @@ def extract_dart_rate_band(text):
     if "개별민평" in context:
         benchmark = "개별민평"
     elif "등급민평" in context:
-        rating_matches = re.findall(r"([A-Z]{1,4}[+-]?)등급", context)
+        rating_matches = re.findall(r"([A-Z]{1,4}(?:[+\-0])?)등급", context)
         instrument_matches = re.findall(r"(은행채|회사채)", context)
         term_matches = re.findall(r"(\d+(?:\.\d+)?)년(?:\s*만기)?", context)
         benchmark_parts = []
@@ -1226,7 +1233,7 @@ def parse_dart_bond_event(disclosure, overview_html, pricing_html=None):
             max_amount_eok = None
 
     rating_matches = re.findall(
-        r"평가결과등급\s+([A-Z]{1,4}[+-]?)(?:\([^)]*\))?",
+        r"평가결과등급\s+([A-Z]{1,4}(?:[+\-0])?)(?:\([^)]*\))?",
         overview_text,
     )
     ratings = list(dict.fromkeys(rating_matches))
@@ -1458,7 +1465,7 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
         r"^\s*(?P<issuer>\S(?:.*?\S)?)\s{2,}"
         rf"(?P<rating>{rating_pattern})\s+"
         r"(?P<term>\d+(?:\.\d+)?|\d+NC\d+)\s+"
-        r"(?P<amount>[\d,]+)(?P<rest>.*)$"
+        r"(?P<amount>[\d,]+|금액\s*미정)(?P<rest>.*)$"
     )
     continuation_pattern = re.compile(
         r"^\s{20,}(?P<term>\d+(?:\.\d+)?)\s+"
@@ -1468,9 +1475,11 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
         r"(?P<demand>\d{1,2}/\d{1,2}\([^)]+\)|미정)\s+"
         r"(?P<payment>\d{1,2}/\d{1,2}\([^)]+\))"
     )
-    manager_pattern = re.compile(
+    manager_name_pattern = (
         r"(?:NH|KB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK)"
-        r"(?:/|\s)"
+    )
+    manager_pattern = re.compile(
+        rf"(?P<managers>{manager_name_pattern}(?:/{manager_name_pattern})*)"
     )
     parsed_rows = []
     current = None
@@ -1492,15 +1501,25 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
                 r"(?P<upper>\+?\d+(?:\.\d+)?)",
                 rest,
             )
+            first_amount_text = normalize_whitespace(first_match.group("amount"))
+            first_amount = (
+                int(first_amount_text.replace(",", ""))
+                if re.fullmatch(r"[\d,]+", first_amount_text)
+                else None
+            )
             current = {
                 "issuer": normalize_whitespace(first_match.group("issuer")),
                 "rating": first_match.group("rating"),
                 "terms": [first_match.group("term")],
-                "amounts": [int(first_match.group("amount").replace(",", ""))],
+                "amounts": [first_amount],
                 "raw_max_amount": (
                     None
                     if "증액없음" in amount_area
                     else amount_candidates[-1] if amount_candidates else None
+                ),
+                "managers": (
+                    manager_match.group("managers").split("/")
+                    if manager_match else []
                 ),
                 "demand_text": (
                     schedule_match.group("demand") if schedule_match else None
@@ -1513,7 +1532,7 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
                         (f"{band_match.group('label')} " if band_match.group("label") else "")
                         + f"{band_match.group('lower')}~{band_match.group('upper')}bp"
                     )
-                    if band_match else None
+                    if band_match else "고정" if "고정" in rest else None
                 ),
             }
             parsed_rows.append(current)
@@ -1528,16 +1547,31 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
 
     events = []
     for row in parsed_rows:
-        if not row["demand_text"] or row["demand_text"] == "미정":
+        if not row["demand_text"]:
             continue
-        demand_date = parse_month_day(row["demand_text"], reference_date)
+        demand_date = (
+            None
+            if row["demand_text"] == "미정"
+            else parse_month_day(row["demand_text"], reference_date)
+        )
         payment_date = parse_month_day(row["payment_text"], reference_date)
-        if not demand_date or not payment_date:
+        if (row["demand_text"] != "미정" and not demand_date) or not payment_date:
             continue
 
-        amount_eok = float(sum(row["amounts"]))
+        tranches = [
+            {"term": term, "amount_eok": amount}
+            for term, amount in zip(row["terms"], row["amounts"])
+        ]
+        known_amounts = [
+            amount for amount in row["amounts"] if amount is not None
+        ]
+        amount_eok = float(sum(known_amounts)) if known_amounts else None
         max_amount_eok = row["raw_max_amount"]
-        if max_amount_eok is not None and max_amount_eok <= amount_eok:
+        if (
+            max_amount_eok is not None
+            and amount_eok is not None
+            and max_amount_eok <= amount_eok
+        ):
             max_amount_eok = None
 
         events.append({
@@ -1545,10 +1579,13 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
             "issuer": row["issuer"],
             "rating": row["rating"],
             "term": format_nh_bond_terms(row["terms"]),
+            "tranches": tranches,
+            "managers": row["managers"],
             "security_type": None,
             "amount_eok": amount_eok,
             "max_amount_eok": max_amount_eok,
             "demand_date": demand_date,
+            "demand_date_text": row["demand_text"],
             "payment_date": payment_date,
             "start_time": None,
             "end_time": None,
@@ -1579,6 +1616,10 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
     timeout = max(15, parse_int_env("NH_PDF_TIMEOUT_SECONDS", 90))
     lookback_days = max(0, parse_int_env("NH_PDF_LOOKBACK_DAYS", 3))
     lookahead_days = max(1, parse_int_env("BOND_DART_LOOKAHEAD_DAYS", 14))
+    planned_lookahead_days = max(
+        lookahead_days,
+        parse_int_env("NH_PDF_PLANNED_LOOKAHEAD_DAYS", 45),
+    )
     result = {
         "source": "nh_pdf",
         "status": "unavailable",
@@ -1611,16 +1652,27 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 pdf_url=pdf_url,
             )
             end_date = reference_date + timedelta(days=lookahead_days)
+            planned_end_date = reference_date + timedelta(days=planned_lookahead_days)
             events = [
                 event
                 for event in events
-                if reference_date <= event["demand_date"] <= end_date
+                if (
+                    event.get("demand_date")
+                    and reference_date <= event["demand_date"] <= end_date
+                )
+                or (
+                    not event.get("demand_date")
+                    and reference_date <= event["payment_date"] <= planned_end_date
+                )
             ]
             result.update({
                 "status": "stale" if offset else ("ok" if events else "empty"),
                 "items": sorted(
                     events,
-                    key=lambda item: (item["demand_date"], item["issuer"]),
+                    key=lambda item: (
+                        item.get("demand_date") or item["payment_date"],
+                        item["issuer"],
+                    ),
                 ),
                 "pdf_url": pdf_url,
                 "source_date": source_date,
@@ -1631,10 +1683,10 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
             if getattr(error.response, "status_code", None) == 404:
                 continue
             result["errors"].append(str(error))
-            break
+            continue
         except (requests.RequestException, PdfReadError, ValueError, OSError) as error:
             result["errors"].append(str(error))
-            break
+            continue
 
     if result["errors"]:
         result["status"] = "error"
@@ -1676,14 +1728,16 @@ def is_mezzanine_bond(name):
 
 def get_bond_exclusion_reason(name, amount_eok):
     lowered_name = (name or "").lower()
-    if not name or amount_eok <= 0:
-        return "zero_amount"
+    if not name:
+        return "invalid"
     if any(keyword in lowered_name for keyword in KOFIA_STRUCTURED_BOND_KEYWORDS):
         return "structured"
     if "사모" in name:
         return "private"
     if is_mezzanine_bond(name):
         return "mezzanine"
+    if amount_eok <= 0:
+        return "zero_amount"
     return None
 
 
@@ -1700,7 +1754,11 @@ def classify_kofia_bond(name):
         )
     ):
         return "공사채"
-    if "은행" in name or "금융채권" in name:
+    if (
+        "은행" in name
+        or "금융채권" in name
+        or name.startswith(("한국수출입금융", "농업금융채권"))
+    ):
         return "은행채"
     if "카드" in name or "캐피탈" in name or "저축은행" in name:
         return "여전채"
@@ -1711,14 +1769,18 @@ def normalize_kofia_issuer(name):
     special_issuers = {
         "산업금융채권": "산업은행",
         "중소기업금융채권": "기업은행",
+        "중소기업은행": "기업은행",
         "수출입금융채권": "수출입은행",
+        "한국수출입금융": "수출입은행",
+        "농업금융채권": "농협은행",
     }
     for prefix, issuer in special_issuers.items():
         if name.startswith(prefix):
             return issuer
 
     issuer_match = re.match(
-        r"^(.+?(?:금융지주|저축은행|은행|카드|캐피탈|공사|공단|재단))"
+        r"^(.+?(?:금융지주|저축은행|투자증권|증권|은행|카드|캐피탈|"
+        r"커머셜|공사|공단|재단))"
         r"(?=[\s\d(]|$)",
         name,
     )
@@ -1738,17 +1800,34 @@ def normalize_kofia_issuer(name):
     return issuer or name
 
 
-def parse_kofia_issuance_response(xml_content, include_exclusions=False):
+def is_major_kofia_record(record):
+    name = record.get("name", "")
+    if any(keyword in name for keyword in KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS):
+        return False
+    if record.get("issuer") in KOFIA_ROUTINE_POLICY_BANK_ISSUERS:
+        return False
+    if record.get("amount_eok", 0) <= 0 and record.get("category") == "회사채":
+        return False
+    return True
+
+
+def parse_kofia_issuance_response(
+    xml_content,
+    include_exclusions=False,
+    include_pending=False,
+):
     root = ET.fromstring(xml_content)
     response_detail = normalize_whitespace(root.findtext(".//pfmResponseDtal"))
     if response_detail:
         raise ValueError(response_detail)
 
     records = []
+    pending_records = []
     excluded_counts = {
         "structured": 0,
         "private": 0,
         "mezzanine": 0,
+        "zero_amount": 0,
     }
     for node in root.findall(".//BISComDspDatDTO"):
         values = {
@@ -1760,19 +1839,13 @@ def parse_kofia_issuance_response(xml_content, include_exclusions=False):
             amount_eok = float((values.get("val6") or "0").replace(",", ""))
         except ValueError:
             continue
-        exclusion_reason = get_bond_exclusion_reason(name, amount_eok)
-        if exclusion_reason:
-            if exclusion_reason in excluded_counts:
-                excluded_counts[exclusion_reason] += 1
-            continue
-
         issue_date = None
         try:
             issue_date = datetime.strptime(values.get("val3", ""), "%Y%m%d").date()
         except ValueError:
             pass
 
-        records.append({
+        record = {
             "name": name,
             "issuer": normalize_kofia_issuer(name),
             "category": classify_kofia_bond(name),
@@ -1780,10 +1853,26 @@ def parse_kofia_issuance_response(xml_content, include_exclusions=False):
             "amount_eok": amount_eok,
             "maturity_date": values.get("val4"),
             "coupon": values.get("val9"),
-        })
+        }
+        exclusion_reason = get_bond_exclusion_reason(name, amount_eok)
+        if exclusion_reason == "zero_amount":
+            excluded_counts["zero_amount"] += 1
+            if is_major_kofia_record(record):
+                pending_records.append(record)
+            continue
+        if exclusion_reason:
+            if exclusion_reason in excluded_counts:
+                excluded_counts[exclusion_reason] += 1
+            continue
+        if is_major_kofia_record(record):
+            records.append(record)
 
+    if include_exclusions and include_pending:
+        return records, pending_records, excluded_counts
     if include_exclusions:
         return records, excluded_counts
+    if include_pending:
+        return records, pending_records
     return records
 
 
@@ -1811,6 +1900,16 @@ def aggregate_kofia_issuance(records):
     return categories, total_amount_eok
 
 
+def aggregate_kofia_pending(records):
+    categories = {category: [] for category in BOND_CATEGORY_ORDER}
+    for record in records:
+        category = record["category"]
+        issuer = record["issuer"]
+        if issuer not in categories.setdefault(category, []):
+            categories[category].append(issuer)
+    return categories
+
+
 def fetch_kofia_bond_issuance(reference_date=None, requester=None):
     requester = requester or requests
     reference_date = reference_date or datetime.now().date()
@@ -1819,12 +1918,15 @@ def fetch_kofia_bond_issuance(reference_date=None, requester=None):
         "source": "kofia",
         "status": "empty",
         "items": [],
+        "pending_items": [],
         "categories": {category: [] for category in BOND_CATEGORY_ORDER},
+        "pending_categories": {category: [] for category in BOND_CATEGORY_ORDER},
         "total_amount_eok": 0.0,
         "excluded_counts": {
             "structured": 0,
             "private": 0,
             "mezzanine": 0,
+            "zero_amount": 0,
         },
         "errors": [],
     }
@@ -1842,22 +1944,31 @@ def fetch_kofia_bond_issuance(reference_date=None, requester=None):
             timeout=timeout,
         )
         response.raise_for_status()
-        records, excluded_counts = parse_kofia_issuance_response(
+        records, pending_records, excluded_counts = parse_kofia_issuance_response(
             response.content,
             include_exclusions=True,
+            include_pending=True,
         )
         records = [
             record
             for record in records
             if not record["issue_date"] or record["issue_date"] == reference_date
         ]
+        pending_records = [
+            record
+            for record in pending_records
+            if not record["issue_date"] or record["issue_date"] == reference_date
+        ]
         categories, total_amount_eok = aggregate_kofia_issuance(records)
+        pending_categories = aggregate_kofia_pending(pending_records)
         result.update({
             "items": records,
+            "pending_items": pending_records,
             "categories": categories,
+            "pending_categories": pending_categories,
             "total_amount_eok": total_amount_eok,
             "excluded_counts": excluded_counts,
-            "status": "ok" if records else "empty",
+            "status": "ok" if records else "pending" if pending_records else "empty",
         })
     except (requests.RequestException, ET.ParseError, ValueError) as error:
         result["status"] = "error"
@@ -1867,28 +1978,108 @@ def fetch_kofia_bond_issuance(reference_date=None, requester=None):
     return result
 
 
-def fetch_bond_market_data(reference_date=None):
+def parse_bond_poll_deadline(reference_date):
+    configured_time = os.getenv("BOND_POLL_DEADLINE", "09:00").strip()
+    try:
+        target_clock = datetime.strptime(configured_time, "%H:%M").time()
+    except ValueError:
+        logging.warning(
+            f"   [Bond Market] Invalid BOND_POLL_DEADLINE='{configured_time}'; "
+            "polling disabled."
+        )
+        return None
+    return datetime.combine(reference_date, target_clock)
+
+
+def bond_sources_ready(kofia_result, nh_result, reference_date):
+    kofia_ready = (
+        kofia_result.get("status") == "ok"
+        and bool(kofia_result.get("items"))
+    )
+    nh_ready = (
+        nh_result.get("source_date") == reference_date
+        and nh_result.get("status") in {"ok", "empty"}
+    )
+    return kofia_ready and nh_ready
+
+
+def fetch_bond_market_data(
+    reference_date=None,
+    allow_wait=True,
+    now_provider=None,
+    sleeper=None,
+    dart_fetcher=None,
+    kofia_fetcher=None,
+    nh_fetcher=None,
+):
     reference_date = reference_date or datetime.now().date()
     if not parse_bool_env("BOND_MARKET_ENABLED", True):
         return {"enabled": False, "reference_date": reference_date}
 
-    dart_result = fetch_dart_debt_disclosures(reference_date)
-    kofia_result = fetch_kofia_bond_issuance(reference_date)
-    nh_result = fetch_nh_syndication_schedule(reference_date)
-    logging.info(
-        f"   [Bond Market] DART={dart_result['status']} "
-        f"({len(dart_result['items'])} demand schedule(s)), "
-        f"KOFIA={kofia_result['status']} "
-        f"({len(kofia_result['items'])} issuance record(s)), "
-        f"NH={nh_result['status']} "
-        f"({len(nh_result['items'])} planned schedule(s))."
+    now_provider = now_provider or datetime.now
+    sleeper = sleeper or time.sleep
+    dart_fetcher = dart_fetcher or fetch_dart_debt_disclosures
+    kofia_fetcher = kofia_fetcher or fetch_kofia_bond_issuance
+    nh_fetcher = nh_fetcher or fetch_nh_syndication_schedule
+    interval_seconds = max(1, parse_int_env("BOND_POLL_INTERVAL_SECONDS", 300))
+    deadline = parse_bond_poll_deadline(reference_date)
+    current_time = now_provider()
+    polling_allowed = (
+        allow_wait
+        and parse_bool_env("BOND_POLL_ENABLED", True)
+        and reference_date.weekday() < 5
+        and reference_date == current_time.date()
+        and deadline is not None
     )
+
+    dart_result = dart_fetcher(reference_date)
+    attempts = 0
+    deadline_reached = False
+
+    while True:
+        attempts += 1
+        kofia_result = kofia_fetcher(reference_date)
+        nh_result = nh_fetcher(reference_date)
+        current_time = now_provider()
+        ready = bond_sources_ready(kofia_result, nh_result, reference_date)
+        logging.info(
+            f"   [Bond Market] Attempt {attempts}: "
+            f"DART={dart_result['status']} "
+            f"({len(dart_result['items'])} demand schedule(s)), "
+            f"KOFIA={kofia_result['status']} "
+            f"({len(kofia_result['items'])} confirmed, "
+            f"{len(kofia_result.get('pending_items', []))} amount-pending), "
+            f"NH={nh_result['status']} "
+            f"({len(nh_result['items'])} planned schedule(s))."
+        )
+        if ready or not polling_allowed:
+            break
+
+        remaining_seconds = (deadline - current_time).total_seconds()
+        if remaining_seconds <= 0:
+            deadline_reached = True
+            logging.warning(
+                f"   [Bond Market] Sources still incomplete at "
+                f"{deadline.strftime('%H:%M')}; using the latest available data."
+            )
+            break
+
+        wait_seconds = min(interval_seconds, max(1, int(remaining_seconds)))
+        logging.info(
+            f"   [Bond Market] Sources not ready; retrying in "
+            f"{wait_seconds} second(s), no later than {deadline.strftime('%H:%M')}."
+        )
+        sleeper(wait_seconds)
+
     return {
         "enabled": True,
         "reference_date": reference_date,
         "dart": dart_result,
         "kofia": kofia_result,
         "nh": nh_result,
+        "poll_attempts": attempts,
+        "deadline_reached": deadline_reached,
+        "fetched_at": current_time,
     }
 
 
@@ -1928,11 +2119,14 @@ def merge_bond_demand_events(dart_items, nh_items):
             for field in (
                 "rating",
                 "term",
+                "tranches",
+                "managers",
                 "security_type",
                 "amount_eok",
                 "max_amount_eok",
                 "payment_date",
                 "rate_band",
+                "demand_date_text",
             ):
                 if not authoritative.get(field) and nh_event.get(field):
                     authoritative[field] = nh_event[field]
@@ -1945,49 +2139,109 @@ def merge_bond_demand_events(dart_items, nh_items):
     )
 
 
-def format_bond_demand_event(event, include_date=False):
-    issuer = html.escape(event["issuer"])
-    report_url = html.escape(event["report_url"], quote=True)
-    prefix = f"{event['demand_date'].strftime('%m/%d')} " if include_date else ""
-    source_suffix = " (NH 예정)" if event.get("source") == "nh_pdf" else ""
-    descriptors = [
-        value
-        for value in (event.get("rating"), event.get("term"), event.get("security_type"))
-        if value
+def compact_bond_term_text(term):
+    parts = [
+        value.strip().removesuffix("년")
+        for value in (term or "").split("/")
+        if value.strip()
     ]
-    details = [", ".join(descriptors)] if descriptors else []
+    if parts and all(re.fullmatch(r"\d+(?:\.\d+)?", value) for value in parts):
+        return "/".join(parts) + "년"
+    return term or ""
 
+
+def format_bond_event_link(event):
+    issuer = html.escape(event["issuer"])
+    report_url = event.get("report_url")
+    if not report_url:
+        return issuer
+    return f'<a href="{html.escape(report_url, quote=True)}">{issuer}</a>'
+
+
+def format_nh_mail_schedule_line(event):
+    parts = []
+    if event.get("end_time"):
+        parts.append(f"<b>{event['end_time']}</b>")
+
+    issuer_text = format_bond_event_link(event)
+    rating = event.get("rating")
+    if rating:
+        issuer_text += f"({html.escape(rating)})"
+    parts.append(issuer_text)
+
+    term = compact_bond_term_text(event.get("term"))
+    if term:
+        parts.append(html.escape(term))
     amount_text = format_eok_amount(event.get("amount_eok"))
     if amount_text:
-        if event.get("max_amount_eok"):
-            amount_text += f" (최대 {format_eok_amount(event['max_amount_eok'])})"
-        details.append(amount_text)
+        parts.append(amount_text)
+    if event.get("max_amount_eok"):
+        parts.append(f"(최대 {format_eok_amount(event['max_amount_eok'])})")
+    parts.append("수요예측")
+    return "- " + " ".join(parts)
 
-    if event.get("start_time") and event.get("end_time"):
-        details.append(f"{event['start_time']}~{event['end_time']}")
-    if event.get("rate_band"):
-        details.append(f"밴드 {event['rate_band']}")
+
+def format_tranche_amounts(event):
+    tranches = event.get("tranches") or []
+    tranche_texts = []
+    for tranche in tranches:
+        term = tranche.get("term", "")
+        term_text = (
+            f"{term}년"
+            if re.fullmatch(r"\d+(?:\.\d+)?", term)
+            else term
+        )
+        amount = tranche.get("amount_eok")
+        amount_text = format_eok_amount(amount) if amount is not None else "금액 미정"
+        tranche_texts.append(f"{term_text} {amount_text}".strip())
+
+    if tranche_texts:
+        result = " / ".join(tranche_texts)
+    else:
+        term = compact_bond_term_text(event.get("term"))
+        amount = format_eok_amount(event.get("amount_eok"))
+        result = " ".join(value for value in (term, amount) if value)
+
+    if event.get("max_amount_eok"):
+        result += f" (최대 {format_eok_amount(event['max_amount_eok'])})"
+    return result
+
+
+def format_nh_mail_detail(event):
+    title = format_bond_event_link(event)
+    if event.get("rating"):
+        title += f" ({html.escape(event['rating'])})"
+    lines = [f"<b>■ {title}</b>"]
+
+    amount_text = format_tranche_amounts(event)
+    if amount_text:
+        lines.append(f"- 발행액: {amount_text}")
+    if event.get("managers"):
+        lines.append(
+            "- 대표주관: "
+            + " / ".join(html.escape(manager) for manager in event["managers"])
+        )
+    demand_date = event.get("demand_date")
+    lines.append(
+        "- 수요예측: "
+        + (demand_date.strftime("%m/%d") if demand_date else "미정")
+    )
     if event.get("payment_date"):
-        details.append(f"납입 {event['payment_date'].strftime('%m/%d')}")
-
-    return (
-        f'- {prefix}<a href="{report_url}">{issuer}</a>{source_suffix}: '
-        + ", ".join(details)
-    )
+        lines.append(f"- 발행일: {event['payment_date'].strftime('%m/%d')}")
+    if event.get("rate_band"):
+        lines.append(f"- 밴드: {html.escape(event['rate_band'])}")
+    return lines
 
 
-def format_kofia_exclusion_summary(excluded_counts):
-    labels = (
-        ("mezzanine", "메자닌(CB·BW·EB)"),
-        ("structured", "파생결합"),
-        ("private", "사모"),
-    )
-    summaries = [
-        f"{label} {excluded_counts.get(key, 0)}건"
-        for key, label in labels
-        if excluded_counts.get(key, 0)
+def get_kofia_mail_category_names(kofia_result, category):
+    names = [
+        item["issuer"]
+        for item in kofia_result.get("categories", {}).get(category, [])
     ]
-    return ", ".join(summaries)
+    for issuer in kofia_result.get("pending_categories", {}).get(category, []):
+        if issuer not in names:
+            names.append(issuer)
+    return names
 
 
 def build_bond_market_section(bond_market_data, reference_date=None):
@@ -2006,7 +2260,9 @@ def build_bond_market_section(bond_market_data, reference_date=None):
     kofia_result = bond_market_data.get("kofia") or {
         "status": "error",
         "items": [],
+        "pending_items": [],
         "categories": {},
+        "pending_categories": {},
     }
     nh_result = bond_market_data.get("nh") or {
         "status": "unavailable",
@@ -2019,10 +2275,55 @@ def build_bond_market_section(bond_market_data, reference_date=None):
     )
     lines = [
         "---",
-        "<b>💳 채권 발행시장 (DART·금투협·NH 예정표)</b>",
-        "<b>오늘 수요예측 (DART·NH 예정표)</b>",
+        "<b>💳 채권 발행시장</b>",
+        "",
+        "<b>[ 금일 주요 발행 채권 ]</b>",
     ]
 
+    category_labels = {
+        "공사채": "지방채/공사채",
+        "은행채": "은행채",
+        "여전채": "여전채",
+        "회사채": "회사채",
+    }
+    issuance_lines = 0
+    for category in BOND_CATEGORY_ORDER:
+        names = get_kofia_mail_category_names(kofia_result, category)
+        if not names:
+            continue
+        max_issuers = max(
+            1,
+            parse_int_env("BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY", 8),
+        )
+        visible_names = names[:max_issuers]
+        issuer_text = ", ".join(html.escape(name) for name in visible_names)
+        if len(names) > max_issuers:
+            issuer_text += f", 외 {len(names) - max_issuers}개"
+        lines.append(
+            f"- <b>{category_labels[category]}</b>: {issuer_text}"
+        )
+        issuance_lines += 1
+
+    if not issuance_lines:
+        if kofia_result.get("status") == "error":
+            lines.append("- 금투협 발행정보 수집 실패")
+        elif bond_market_data.get("deadline_reached"):
+            lines.append("- 09:00까지 확인된 주요 발행 채권 없음")
+        else:
+            lines.append("- 확인된 주요 발행 채권 없음")
+
+    pending_issuers = []
+    for category in BOND_CATEGORY_ORDER:
+        pending_issuers.extend(
+            kofia_result.get("pending_categories", {}).get(category, [])
+        )
+    if pending_issuers:
+        lines.append(
+            "※ 발행액 미확인 종목 포함: "
+            + ", ".join(html.escape(name) for name in dict.fromkeys(pending_issuers))
+        )
+
+    lines.extend(["", "<b>[ 금일 주요 일정 ]</b>"])
     today_events = [
         event
         for event in demand_events
@@ -2035,29 +2336,14 @@ def build_bond_market_section(bond_market_data, reference_date=None):
     ]
 
     if today_events:
-        lines.extend(format_bond_demand_event(event) for event in today_events)
+        lines.extend(format_nh_mail_schedule_line(event) for event in today_events)
     elif (
         dart_result.get("status") == "error"
         and nh_result.get("status") in {"error", "unavailable"}
     ):
-        lines.append("- 수집 실패로 금일 수요예측 여부를 판단할 수 없습니다.")
+        lines.append("- 수요예측 일정 수집 실패")
     else:
-        lines.append("- 금일 기준 확인된 신규 수요예측 일정이 없습니다.")
-
-    if future_events:
-        max_upcoming = max(1, parse_int_env("BOND_DART_MAX_UPCOMING", 5))
-        lines.append("<b>근접 예정 수요예측</b>")
-        lines.extend(
-            format_bond_demand_event(event, include_date=True)
-            for event in future_events[:max_upcoming]
-        )
-        if len(future_events) > max_upcoming:
-            lines.append(f"- 외 {len(future_events) - max_upcoming}건")
-
-    if dart_result.get("status") == "partial" and today_events:
-        lines.append("- 참고: 일부 DART 원문을 읽지 못해 일정이 누락됐을 수 있습니다.")
-    elif dart_result.get("status") in {"error", "partial"}:
-        lines.append("- 참고: DART 원문 수집 장애로 일부 일정이 누락됐을 수 있습니다.")
+        lines.append("- 없음")
 
     if nh_result.get("status") == "stale":
         source_date = nh_result.get("source_date")
@@ -2065,60 +2351,50 @@ def build_bond_market_section(bond_market_data, reference_date=None):
             source_date.strftime("%m/%d") if source_date else "이전 영업일"
         )
         lines.append(
-            f"- 참고: 당일 NH 예정표를 찾지 못해 {source_date_text} 자료를 사용했습니다."
+            f"※ NH 당일 예정표 미확인, {source_date_text} 자료 사용"
         )
     elif nh_result.get("status") in {"error", "unavailable"}:
-        lines.append("- 참고: NH 예정표를 확인하지 못해 예정 일정이 누락됐을 수 있습니다.")
+        lines.append("※ NH 당일 예정표를 확인하지 못함")
 
-    lines.append("<b>오늘 발행 (금투협 채권정보센터)</b>")
-    exclusion_summary = format_kofia_exclusion_summary(
-        kofia_result.get("excluded_counts", {})
-    )
-    if kofia_result.get("status") == "ok":
-        max_issuers = max(1, parse_int_env("BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY", 8))
-        for category in BOND_CATEGORY_ORDER:
-            issuers = kofia_result.get("categories", {}).get(category, [])
-            if not issuers:
-                continue
-            issuer_texts = [
-                f"{html.escape(item['issuer'])}({format_eok_amount(item['amount_eok'])})"
-                for item in issuers[:max_issuers]
-            ]
-            if len(issuers) > max_issuers:
-                issuer_texts.append(f"외 {len(issuers) - max_issuers}개")
-            lines.append(f"- <b>{category}</b>: " + ", ".join(issuer_texts))
-        lines.append(
-            f"- 확인 발행액: <b>{format_eok_amount(kofia_result.get('total_amount_eok', 0))}</b>"
+    undated_events = [
+        event
+        for event in nh_result.get("items", [])
+        if not event.get("demand_date")
+    ]
+    nh_led_future_events = [
+        event
+        for event in future_events + undated_events
+        if "NH" in (event.get("managers") or [])
+    ]
+    detail_candidates = today_events + nh_led_future_events
+    unique_details = []
+    detail_keys = set()
+    for event in detail_candidates:
+        key = (
+            normalize_bond_issuer_key(event.get("issuer", "")),
+            event.get("demand_date"),
+            event.get("payment_date"),
         )
-        lines.append("- 기준: 발행액이 확인된 공모 일반채; 파생결합·사모·CB·BW·EB 제외")
-    elif kofia_result.get("status") == "empty":
-        if exclusion_summary:
-            lines.append("- 일반 공모채 기준 확인된 발행 종목이 없습니다.")
-        else:
-            lines.append(
-                f"- {reference_date.strftime('%m/%d')} 데이터가 아직 반영되지 않았거나 "
-                "조회 결과가 없습니다."
-            )
-        lines.append("- 기준: 발행액이 확인된 공모 일반채; 파생결합·사모·CB·BW·EB 제외")
-    else:
-        lines.append("- 수집 실패로 금일 발행 여부를 판단할 수 없습니다.")
+        if key in detail_keys:
+            continue
+        detail_keys.add(key)
+        unique_details.append(event)
 
-    if exclusion_summary:
-        lines.append(f"- 제외 집계: {exclusion_summary}")
+    max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 4))
+    for event in unique_details[:max_details]:
+        lines.append("")
+        lines.extend(format_nh_mail_detail(event))
 
     nh_source_url = html.escape(
         nh_result.get("pdf_url") or build_nh_syndication_pdf_url(reference_date),
         quote=True,
     )
     lines.extend([
-        "<b>GP 체크</b>",
-        "- 수요예측 후 정정공시의 유효수요·확정 스프레드·증액 여부를 "
-        "인수금융 및 리파이낸싱 벤치마크로 추적.",
+        "",
         (
-            f'출처: <a href="{DART_DEBT_BOARD_URL}">DART 채무증권 공시</a> · '
-            f'<a href="{KOFIA_BOND_CENTER_URL}">금투협 채권정보센터</a> '
-            f'(발행정보: 한국예탁결제원 제공) · '
-            f'<a href="{nh_source_url}">NH Syndication 발행예정표</a>'
+            f'출처: <a href="{DART_DEBT_BOARD_URL}">DART</a> · '
+            f'<a href="{KOFIA_BOND_CENTER_URL}">금투협</a> · '
+            f'<a href="{nh_source_url}">NH Syndication</a>'
         ),
     ])
     return "\n".join(lines)
@@ -3203,7 +3479,10 @@ def main():
 
     # 8. Fetch official bond issuance market data for the PEF channel.
     logging.info("7. Fetching Bond Issuance Market Data (DART/KOFIA/NH PDF)...")
-    bond_market_data = fetch_bond_market_data(today)
+    bond_market_data = fetch_bond_market_data(
+        today,
+        allow_wait=not (test_mode or custom_date_run or is_kr_holiday),
+    )
 
     # 9. Generate PEF Briefing
     logging.info("8. Generating PEF Briefing using Gemini...")
