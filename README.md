@@ -12,12 +12,14 @@
     - **일요일**: 이번 주 증시 정리 및 다음 주 주요 경제 일정/전망
 - **PEF(사모펀드) 전용 브리핑**: M&A 및 PEF 관련 주요 뉴스를 추가 수집하고, 저신뢰 기사 필터링을 거쳐 GP(General Partner) 관점의 심층 인사이트 브리핑을 별도로 생성합니다. (참고 뉴스 원문 링크 포함)
 - **Baikal 언급 뉴스 레이더**: `PEF_FIRM_NAME`으로 지정한 운용사명이 직접 언급된 최신 뉴스를 별도 수집하고, 기사에 등장한 회사/기관/인물을 요약합니다.
+- **관심 기업 뉴스 레이더**: `pef_watchlist.json`에 등록한 회사별 최신 뉴스를 별도 수집해 GP 관점 시사점과 원문 링크를 회사별로 정리합니다. 신규 기사가 없으면 빈 섹션과 링크 메시지는 만들지 않습니다.
 - **채권 발행시장**: PEF 채널에 DART, NH Syndication PDF, 금융투자협회 데이터를 NH 데일리 메일과 유사한 `금일 주요 발행 채권·주요 일정·발행 상세` 형식으로 제공합니다. 특수은행의 일상 발행, 유동화 SPC, 파생결합증권·사모·CB·BW·EB는 제외하고 발행액 미확인 공사채 등은 별도로 표시합니다.
 - **채권 데이터 폴링**: 평일 PEF 실행 후 NH 당일 PDF와 금투협 발행정보가 준비되지 않았으면 5분 간격으로 재조회하며, 늦어도 `09:00`에는 확보된 최신 자료로 브리핑을 생성합니다.
 - **채널별 실행 시각**: 일반 뉴스 브리핑은 즉시 생성·전송한 뒤, 프로세스가 기본 `08:10`까지 대기하고 PEF 뉴스와 채권 자료를 새로 수집합니다.
 - **중복 뉴스 방지**: 같은 링크/제목뿐 아니라 유사 제목의 동일 사건도 제거합니다. 기사는 Telegram 본문과 링크 전송이 모두 성공한 뒤에만 히스토리에 기록됩니다.
 - **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
 - **주말 수익률**: 토·일요일 브리핑은 전일 등락률이 아닌 약 1주 전 최근 거래일 대비 주간 등락률을 사용합니다.
+- **월요일 주말 보강**: 평일 cron에서 토·일 실행을 제외해도 월요일에는 최근 3일 뉴스를 조회하고, 주말 글로벌 뉴스와 이번 주 주요 일정을 추가 확인합니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **HTML 이메일 배포**: Telegram 전송 시도 후 일반/PEF 수신자 그룹에 브리핑을 multipart HTML 이메일로 별도 배포합니다. PEF 이메일에는 관련 뉴스 링크도 한 통에 포함됩니다.
 - **휴장일 자동 감지**:
@@ -90,6 +92,10 @@ PEF_FIRM_NAME=Baikal Investment
 PEF_FIRM_NEWS_LOOKBACK_DAYS=30
 # 쉼표로 구분해 회사명 검색어를 직접 지정할 수 있음
 PEF_FIRM_NEWS_QUERIES=바이칼인베스트먼트,바이칼 인베스트먼트,Baikal Investment
+# 관심 기업 설정 파일과 회사별 수집 한도
+PEF_WATCHLIST_FILE=pef_watchlist.json
+PEF_WATCHLIST_MAX_ARTICLES_PER_COMPANY=2
+PEF_WATCHLIST_MAX_CANDIDATES_PER_QUERY=5
 # 일반 브리핑 전송 후 PEF 수집을 시작할 서버 현지 시각
 PEF_WAIT_ENABLED=true
 PEF_START_TIME=08:10
@@ -114,6 +120,12 @@ NEWS_HISTORY_ENABLED=true
 NEWS_HISTORY_FILE=.news_history.json
 NEWS_HISTORY_RETENTION_DAYS=30
 NEWS_HISTORY_TITLE_MATCH_DAYS=7
+
+# 뉴스 수집 범위 (아래 값이 기본값)
+NEWS_LOOKBACK_DAYS=1
+NEWS_MAX_ARTICLES_PER_QUERY=3
+MONDAY_NEWS_LOOKBACK_DAYS=3
+MONDAY_NEWS_MAX_ARTICLES_PER_QUERY=5
 ```
 
 ## 📖 사용 방법 (Usage)
@@ -123,6 +135,9 @@ NEWS_HISTORY_TITLE_MATCH_DAYS=7
 ```bash
 python main.py
 ```
+운영 cron을 월~금에만 실행해도 됩니다. 월요일은 `weekday` 모드를 유지하면서 최근 3일의 주말 뉴스와 이번 주 일정 쿼리를 자동으로 추가하고, 토·일요일 모드는 수동 실행용으로 남아 있습니다.
+
+PEF 관심 기업은 `pef_watchlist.json`에서 관리합니다. 기본값은 `모노틱`, `페퍼저축은행`이며 `aliases`에 기사에서 사용할 수 있는 다른 표기를 추가할 수 있습니다. 월요일에는 관심 기업 뉴스도 최근 3일을 확인하고, 한 번 전송 완료된 기사는 기존 PEF 뉴스 히스토리 기준으로 다시 보내지 않습니다.
 
 ### 수동 모드 테스트 (Manual Mode)
 특정 요일의 로직을 강제로 테스트하려면 `--mode` 옵션을 사용하세요.
@@ -167,6 +182,7 @@ python list_models.py
 
 ## 📂 파일 구조
 - `main.py`: 메인 실행 파일 (데이터 수집, AI 분석, Telegram/HTML 이메일 전송)
+- `pef_watchlist.json`: PEF 관심 기업명과 검색 별칭 설정
 - `list_models.py`: 사용 가능한 Gemini 모델 확인용 스크립트
 - `requirements.txt`: 필요한 Python 라이브러리 목록
 - `.env`: API 키 등 보안 정보 저장 (직접 생성 필요)

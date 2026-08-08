@@ -135,6 +135,7 @@ FIRM_SHORT_NAME_CONTEXT_KEYWORDS = [
 
 TELEGRAM_MESSAGE_LIMIT = 3900
 PEF_FIRM_MENTION_MAX_ARTICLES = 5
+DEFAULT_PEF_WATCHLIST_FILE = "pef_watchlist.json"
 DEFAULT_NEWS_HISTORY_FILE = ".news_history.json"
 DEFAULT_NEWS_HISTORY_RETENTION_DAYS = 30
 DEFAULT_NEWS_HISTORY_TITLE_MATCH_DAYS = 7
@@ -389,6 +390,58 @@ def get_pef_persona_config():
     }
 
 
+def get_pef_watchlist_path():
+    configured_path = os.getenv("PEF_WATCHLIST_FILE", DEFAULT_PEF_WATCHLIST_FILE).strip()
+    if os.path.isabs(configured_path):
+        return configured_path
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), configured_path)
+
+
+def load_pef_watchlist(path=None):
+    watchlist_path = path or get_pef_watchlist_path()
+    try:
+        with open(watchlist_path, "r", encoding="utf-8") as watchlist_file:
+            raw_items = json.load(watchlist_file)
+    except FileNotFoundError:
+        logging.warning(f"   [Watchlist] File not found: {watchlist_path}")
+        return []
+    except (OSError, json.JSONDecodeError) as error:
+        logging.warning(f"   [Watchlist] Could not load {watchlist_path}: {error}")
+        return []
+
+    if not isinstance(raw_items, list):
+        logging.warning(f"   [Watchlist] Expected a JSON list: {watchlist_path}")
+        return []
+
+    normalized_items = []
+    seen_names = set()
+    for raw_item in raw_items:
+        if not isinstance(raw_item, dict):
+            continue
+        raw_name = raw_item.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        name = normalize_whitespace(raw_name)
+        if not name or name.lower() in seen_names:
+            continue
+        raw_aliases = raw_item.get("aliases", [])
+        if not isinstance(raw_aliases, list):
+            raw_aliases = []
+        aliases = [
+            normalize_whitespace(alias)
+            for alias in raw_aliases
+            if isinstance(alias, str) and normalize_whitespace(alias)
+        ]
+        aliases = list(dict.fromkeys([name] + aliases))
+        normalized_items.append({"name": name, "aliases": aliases})
+        seen_names.add(name.lower())
+
+    logging.info(
+        f"   [Watchlist] Loaded {len(normalized_items)} company(s) from {watchlist_path}."
+    )
+    return normalized_items
+
+
 def parse_int_env(name, default):
     try:
         return int(os.getenv(name, default))
@@ -401,6 +454,76 @@ def parse_bool_env(name, default=True):
     if value is None:
         return default
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def get_news_fetch_settings(mode="weekday", reference_date=None):
+    reference_date = reference_date or datetime.now().date()
+    monday_catchup = mode == "weekday" and reference_date.weekday() == 0
+
+    if monday_catchup:
+        lookback_days = max(1, parse_int_env("MONDAY_NEWS_LOOKBACK_DAYS", 3))
+        max_entries = max(1, parse_int_env("MONDAY_NEWS_MAX_ARTICLES_PER_QUERY", 5))
+    else:
+        lookback_days = max(1, parse_int_env("NEWS_LOOKBACK_DAYS", 1))
+        max_entries = max(1, parse_int_env("NEWS_MAX_ARTICLES_PER_QUERY", 3))
+
+    return {
+        "lookback_days": lookback_days,
+        "max_entries_per_query": max_entries,
+        "monday_catchup": monday_catchup,
+    }
+
+
+def build_news_queries(
+    mode="weekday",
+    is_us_holiday=False,
+    is_kr_holiday=False,
+    target="general",
+    reference_date=None,
+):
+    reference_date = reference_date or datetime.now().date()
+
+    if mode == "saturday":
+        logging.info("   [Mode] Saturday: Focusing on US Market Close & Global News")
+        queries = ["미국 증시 마감", "주간 해외 증시", "글로벌 경제뉴스"]
+    elif mode == "sunday":
+        logging.info("   [Mode] Sunday: Focusing on Weekly Summary & Next Week Outlook")
+        queries = ["주간 증시 정리", "다음주 증시 일정", "다음주 경제 캘린더", "주간 증시 전망"]
+    elif is_kr_holiday:
+        if is_us_holiday:
+            logging.info("   [Mode] Weekday (KR & US Holiday): Focusing on Global Economy")
+            queries = ["글로벌 경제뉴스", "해외 증시 요약", "미국 경제 뉴스"]
+        else:
+            logging.info("   [Mode] Weekday (KR Holiday): Focusing on US Market & Global News")
+            queries = ["미국 증시 마감", "글로벌 경제뉴스", "주요 해외 뉴스"]
+    elif is_us_holiday:
+        logging.info("   [Mode] Weekday (US Holiday): Focusing on General US Economy")
+        queries = ["미국 경제 뉴스", "특징주", "국내 증시 전망"]
+    else:
+        logging.info("   [Mode] Weekday: Focusing on Daily Market Outlook")
+        queries = ["미국 증시 마감", "특징주", "국내 증시 전망"]
+
+    if mode == "weekday" and reference_date.weekday() == 0 and target == "general":
+        logging.info("   [Mode] Monday catch-up: Adding weekend news and this-week schedules")
+        queries.extend([
+            "주말 글로벌 경제 뉴스",
+            "이번주 증시 일정",
+            "이번주 경제 캘린더",
+        ])
+
+    if target == "pef":
+        logging.info("   [Target] PEF: Using dedicated M&A and Private Equity queries")
+        queries = [
+            "사모펀드",
+            "PEF M&A",
+            "PEF 투자 규제",
+            "사모펀드 운용사 GP",
+            "M&A 인수합병",
+            "경영권 매각",
+            "인수금융 리파이낸싱",
+        ]
+
+    return list(dict.fromkeys(queries))
 
 
 def wait_until_pef_start(reference_date, test_mode=False, now=None, sleeper=None):
@@ -614,7 +737,7 @@ def log_fetch_status(status, label):
 
 
 def history_scope(target):
-    return "pef" if target in {"pef", "firm_mention"} else "general"
+    return "pef" if target in {"pef", "firm_mention", "pef_watchlist"} else "general"
 
 
 def get_news_history_path():
@@ -950,6 +1073,25 @@ def build_news_links_message(links, title="🔗 금일 수집된 주요 뉴스 �
         safe_title = html.escape(article_title)
         safe_link = html.escape(article_link, quote=True)
         lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
+    return "\n".join(lines)
+
+
+def build_watchlist_links_message(links, title="🔎 관심 기업 뉴스 링크"):
+    if not links:
+        return None
+
+    grouped_links = {}
+    for item in links:
+        grouped_links.setdefault(item["company"], []).append(item)
+
+    lines = [f"<b>{html.escape(title)}</b>"]
+    for company, company_links in grouped_links.items():
+        lines.append("")
+        lines.append(f"<b>{html.escape(company)}</b>")
+        for item in company_links:
+            safe_title = html.escape(item["title"])
+            safe_link = html.escape(item["link"], quote=True)
+            lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
     return "\n".join(lines)
 
 
@@ -2521,64 +2663,21 @@ def fetch_news(
     Fetches top economic news using Google News RSS with specific search queries
     based on the mode (weekday/saturday/sunday) and holiday status.
     """
-    
-    if mode == "saturday":
-        logging.info("   [Mode] Saturday: Focusing on US Market Close & Global News")
-        queries = [
-            "미국 증시 마감",     # US Market Close
-            "주간 해외 증시",     # Weekly Overseas Market
-            "글로벌 경제뉴스"     # Global Economic News
-        ]
-    elif mode == "sunday":
-        logging.info("   [Mode] Sunday: Focusing on Weekly Summary & Next Week Outlook")
-        queries = [
-            "주간 증시 정리",     # Weekly Market Summary
-            "다음주 증시 일정",   # Next Week Market Schedule
-            "다음주 경제 캘린더", # Next Week Economic Calendar
-            "주간 증시 전망"      # Weekly Market Outlook
-        ]
-    else: # weekday
-        if is_kr_holiday:
-            if is_us_holiday:
-                logging.info("   [Mode] Weekday (KR & US Holiday): Focusing on Global Economy")
-                queries = [
-                    "글로벌 경제뉴스",     # Global Economic News
-                    "해외 증시 요약",      # Overseas Market Summary
-                    "미국 경제 뉴스"       # US Economic News
-                ]
-            else:
-                logging.info("   [Mode] Weekday (KR Holiday): Focusing on US Market & Global News")
-                queries = [
-                    "미국 증시 마감",     # US Market Close
-                    "글로벌 경제뉴스",     # Global Economic News
-                    "주요 해외 뉴스"      # Major Overseas News
-                ]
-        elif is_us_holiday:
-            logging.info("   [Mode] Weekday (US Holiday): Focusing on General US Economy")
-            queries = [
-                "미국 경제 뉴스",     # US Economic News (Generic)
-                "특징주",            # Hot Stocks
-                "국내 증시 전망"      # Korea Market Outlook
-            ]
-        else:
-            logging.info("   [Mode] Weekday: Focusing on Daily Market Outlook")
-            queries = [
-                "미국 증시 마감",     # US Market Close
-                "특징주",            # Hot Stocks
-                "국내 증시 전망"      # Korea Market Outlook
-            ]
-            
-    if target == "pef":
-        logging.info("   [Target] PEF: Using dedicated M&A and Private Equity queries")
-        queries = [
-            "사모펀드",
-            "PEF M&A",
-            "PEF 투자 규제",
-            "사모펀드 운용사 GP",
-            "M&A 인수합병",
-            "경영권 매각",
-            "인수금융 리파이낸싱",
-        ]
+    reference_date = collected_date or datetime.now().date()
+    queries = build_news_queries(
+        mode=mode,
+        is_us_holiday=is_us_holiday,
+        is_kr_holiday=is_kr_holiday,
+        target=target,
+        reference_date=reference_date,
+    )
+    fetch_settings = get_news_fetch_settings(mode=mode, reference_date=reference_date)
+    lookback_days = fetch_settings["lookback_days"]
+    max_entries_per_query = fetch_settings["max_entries_per_query"]
+    logging.info(
+        f"   [News Window] lookback={lookback_days}d, "
+        f"max_entries_per_query={max_entries_per_query}"
+    )
     
     combined_news_context = ""
     seen_links = set(initial_seen_links) if initial_seen_links else set()
@@ -2591,7 +2690,7 @@ def fetch_news(
     logging.info("   Fetching news and scraping content...")
     
     for query in queries:
-        time_restricted_query = f"{query} when:1d"
+        time_restricted_query = f"{query} when:{lookback_days}d"
         fetch_status["queries_attempted"] += 1
         try:
             response = requests.get(
@@ -2605,7 +2704,7 @@ def fetch_news(
                 timeout=10,
             )
             feed = parse_google_news_feed(response)
-            entries = list(feed.entries[:3])
+            entries = list(feed.entries[:max_entries_per_query])
             fetch_status["queries_succeeded"] += 1
             fetch_status["entries_found"] += len(entries)
             
@@ -2789,6 +2888,151 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
             logging.error(f"   Error fetching firm mention RSS for {query}: {e}")
 
     log_fetch_status(fetch_status, "firm mentions")
+    return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
+
+
+def watchlist_company_matches(searchable_text, aliases):
+    compact_text = re.sub(r"\s+", "", searchable_text or "")
+    for alias in aliases:
+        normalized_alias = normalize_text(alias)
+        if normalized_alias and normalized_alias in searchable_text:
+            return True
+        compact_alias = re.sub(r"\s+", "", normalized_alias)
+        if compact_alias and compact_alias in compact_text:
+            return True
+    return False
+
+
+def fetch_watchlist_news(
+    watchlist,
+    mode="weekday",
+    initial_seen_links=None,
+    news_history=None,
+    collected_date=None,
+):
+    reference_date = collected_date or datetime.now().date()
+    fetch_settings = get_news_fetch_settings(mode=mode, reference_date=reference_date)
+    lookback_days = fetch_settings["lookback_days"]
+    max_candidates = max(1, parse_int_env("PEF_WATCHLIST_MAX_CANDIDATES_PER_QUERY", 5))
+    max_per_company = max(1, parse_int_env("PEF_WATCHLIST_MAX_ARTICLES_PER_COMPANY", 2))
+    seen_links = set(initial_seen_links) if initial_seen_links else set()
+    combined_news_context = ""
+    collected_links = []
+    pending_articles = []
+    fetch_status = new_fetch_status("pef_watchlist")
+
+    if not watchlist:
+        logging.info("   [Watchlist] No companies configured; collection skipped.")
+        return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
+
+    logging.info(
+        f"   [Watchlist] Searching {len(watchlist)} company(s) "
+        f"(lookback={lookback_days}d, max_per_company={max_per_company})."
+    )
+
+    for company in watchlist:
+        company_name = company["name"]
+        aliases = company.get("aliases") or [company_name]
+        company_links = 0
+        attempted_links = set()
+        accepted_event_titles = []
+
+        for alias in aliases:
+            if company_links >= max_per_company:
+                break
+            rss_query = f'"{alias}" when:{lookback_days}d'
+            fetch_status["queries_attempted"] += 1
+            try:
+                response = requests.get(
+                    "https://news.google.com/rss/search",
+                    params={
+                        "q": rss_query,
+                        "hl": "ko",
+                        "gl": "KR",
+                        "ceid": "KR:ko",
+                    },
+                    timeout=10,
+                )
+                feed = parse_google_news_feed(response)
+                entries = list(feed.entries[:max_candidates])
+                fetch_status["queries_succeeded"] += 1
+                fetch_status["entries_found"] += len(entries)
+
+                for entry in entries:
+                    if company_links >= max_per_company:
+                        break
+                    if entry.link in seen_links or entry.link in attempted_links:
+                        continue
+                    attempted_links.add(entry.link)
+
+                    skip_article, skip_reason, _title_key = should_skip_seen_article(
+                        entry,
+                        news_history,
+                        target="pef_watchlist",
+                    )
+                    if skip_article:
+                        logging.info(
+                            f"      [News History] SKIP watchlist ({skip_reason}): {entry.title}"
+                        )
+                        seen_links.add(entry.link)
+                        continue
+
+                    logging.info(f"   - Watchlist candidate [{company_name}]: {entry.title}")
+                    content = scrape_article_content(entry.link)
+                    searchable_text = normalize_text(entry.title, content)
+                    if not watchlist_company_matches(searchable_text, aliases):
+                        logging.info(
+                            f"      [Watchlist] REJECT [{company_name}]: company name not found"
+                        )
+                        continue
+
+                    duplicate_title = find_duplicate_event_title(
+                        entry.title,
+                        accepted_event_titles,
+                    )
+                    if duplicate_title:
+                        logging.info(
+                            f"      [Event Dedupe] SKIP watchlist event: {entry.title} "
+                            f"(matched: {duplicate_title})"
+                        )
+                        continue
+
+                    seen_links.add(entry.link)
+                    accepted_event_titles.append(entry.title)
+                    company_links += 1
+                    logging.info(f"      [Watchlist] ACCEPT [{company_name}]")
+
+                    article_context = ""
+                    article_context += "\n\n--- WATCHLIST ARTICLE START ---\n"
+                    article_context += f"Watchlist Company: {company_name}\n"
+                    article_context += f"Title: {entry.title}\n"
+                    article_context += f"Link: {entry.link}\n"
+                    article_context += f"Date: {getattr(entry, 'published', 'Unknown')}\n"
+                    article_context += f"Content:\n{content or '(Content scraping failed)'}\n"
+                    article_context += "--- WATCHLIST ARTICLE END ---\n"
+                    combined_news_context += article_context
+                    collected_links.append({
+                        "company": company_name,
+                        "title": entry.title,
+                        "link": entry.link,
+                    })
+                    stage_article_for_history(
+                        pending_articles,
+                        entry,
+                        "pef_watchlist",
+                        collected_date=collected_date,
+                    )
+
+            except Exception as error:
+                fetch_status["queries_failed"] += 1
+                fetch_status["errors"].append(
+                    f"{company_name}/{alias}: {type(error).__name__}: {str(error)[:200]}"
+                )
+                logging.error(
+                    f"   Error fetching watchlist RSS for {company_name}/{alias}: {error}"
+                )
+
+    log_fetch_status(fetch_status, "PEF watchlist")
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
 
@@ -3042,6 +3286,15 @@ def generate_briefing(
         
         # Determine Header
         header = f"<b>📊 {today} 한국 증시 종합 전망 보고서{kr_holiday_text}</b>"
+        monday_section = ""
+        if reference_date.weekday() == 0:
+            monday_section = """
+    <b>🗓️ 이번 주 주요 일정</b>
+    - (입력 기사에 날짜와 이벤트가 명시된 이번 주 경제지표/정책/기업 일정 최대 4개)
+    - (확인 가능한 일정이 없으면 "입력 기사 기준 확인된 일정 없음"으로 표시하고 추정하지 말 것)
+
+    ---
+            """
         
         # US Market Section
         if is_us_holiday:
@@ -3095,6 +3348,7 @@ def generate_briefing(
     {us_section}
     
     ---
+    {monday_section}
     {kr_section}
     
     ---
@@ -3107,6 +3361,20 @@ def generate_briefing(
     if target == "pef":
         pef_context = get_pef_persona_config()
         firm_name = pef_context["firm_name"]
+        has_watchlist_articles = "--- WATCHLIST ARTICLE START ---" in (news_context or "")
+        watchlist_section = ""
+        watchlist_instruction = ""
+        if has_watchlist_articles:
+            watchlist_section = """
+    <b>🔎 관심 기업 뉴스 레이더</b>
+    - (WATCHLIST ARTICLE을 회사별로 묶어 신규 동향, GP 관점 시사점, 추가 확인사항을 각 1-2문장으로 정리)
+    - (기사에 없는 거래 참여, 가격, 일정, 의사결정은 추정하지 말 것)
+
+    ---
+            """
+            watchlist_instruction = """
+    - **Watchlist radar**: Use only articles marked "WATCHLIST ARTICLE" in the watchlist section. Group them by the supplied Watchlist Company name, keep facts separate from GP implications, and do not infer Baikal's intent or participation.
+    """
         prompt_content = f"""
     <b>👔 {today} {firm_name} GP 인사이트 브리핑{kr_holiday_text}</b>
     
@@ -3137,6 +3405,7 @@ def generate_briefing(
     - (원가, 가격, 현금흐름, 조직, 거버넌스 관점)
     
     ---
+    {watchlist_section}
     
     <b>🧭 {firm_name} 언급 뉴스/회사명 레이더</b>
     - (FIRM MENTION ARTICLE이 있으면, 기사에 등장한 회사/기관/인물을 1-3개만 리스트업하고 {firm_name} 관점의 의미를 한 줄로 정리)
@@ -3155,6 +3424,7 @@ def generate_briefing(
         )
         specific_instructions = f"""
     - **Perspective**: Prioritize implications for sourcing, underwriting, financing, exit, and portfolio value creation.
+    {watchlist_instruction}
     - **Firm mention radar**: Use only articles marked "FIRM MENTION ARTICLE" for the {firm_name} mention/news radar. Extract concrete company, institution, or person names from those articles. Do not invent names.
     - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
     - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
@@ -3172,6 +3442,10 @@ def generate_briefing(
     - **Uncertainty**: Label unsupported interpretation as "(추론)" and use low confidence when evidence is thin or mixed.
     - **No trading directives**: Do not use language such as aggressive buy, sell, must buy, or target price. Provide monitoring priorities and conditions instead.
     - **Article scope**: A single article cannot establish a broad market regime. Separate confirmed facts from a tentative implication.
+    """
+        if mode == "weekday" and reference_date.weekday() == 0:
+            specific_instructions += """
+    - **Monday catch-up**: Distinguish Friday market-close facts from events reported over the weekend. Summarize this week's schedule only when dates and event names appear in the supplied articles.
     """
 
     prompt = f"""
@@ -3754,6 +4028,7 @@ def main():
     # --- PEF GP Briefing ---
     logging.info("\n--- Starting PEF GP Briefing Sequence ---")
     pef_context = get_pef_persona_config()
+    pef_watchlist = load_pef_watchlist()
 
     # 6. Fetch firm mention news first so direct mentions are preserved.
     logging.info("5. Fetching & Scraping Firm Mention News...")
@@ -3770,9 +4045,26 @@ def main():
         news_history=news_history,
         collected_date=today
     )
-    
-    # 7. Fetch additional PEF News
-    logging.info("6. Fetching & Scraping PEF News...")
+
+    # 7. Fetch configured company watchlist news before generic PEF news.
+    logging.info("6. Fetching & Scraping PEF Watchlist News...")
+    (
+        news_context_watchlist,
+        watchlist_links,
+        _,
+        pending_watchlist,
+        watchlist_fetch_status,
+    ) = fetch_watchlist_news(
+        pef_watchlist,
+        mode=mode,
+        initial_seen_links={link for _, link in firm_mention_links},
+        news_history=news_history,
+        collected_date=today,
+    )
+    watchlist_link_urls = {item["link"] for item in watchlist_links}
+
+    # 8. Fetch additional PEF News
+    logging.info("7. Fetching & Scraping PEF News...")
     (
         news_context_pef,
         pef_links,
@@ -3784,24 +4076,36 @@ def main():
         is_us_holiday=is_us_holiday_prev_close, 
         is_kr_holiday=is_kr_holiday, 
         target="pef",
-        initial_seen_links=initial_pef_seen_links | {link for _, link in firm_mention_links},
+        initial_seen_links=(
+            initial_pef_seen_links
+            | {link for _, link in firm_mention_links}
+            | watchlist_link_urls
+        ),
         news_history=news_history,
         collected_date=today
     )
-    combined_pef_context = news_context_firm_mentions + news_context_pef
-    combined_pef_fetch_status = merge_fetch_statuses(firm_fetch_status, pef_fetch_status)
+    combined_pef_context = (
+        news_context_firm_mentions
+        + news_context_watchlist
+        + news_context_pef
+    )
+    combined_pef_fetch_status = merge_fetch_statuses(
+        firm_fetch_status,
+        watchlist_fetch_status,
+        pef_fetch_status,
+    )
     log_fetch_status(combined_pef_fetch_status, "combined PEF")
     pef_source_links = dedupe_links(firm_mention_links + pef_links)
 
-    # 8. Fetch official bond issuance market data for the PEF channel.
-    logging.info("7. Fetching Bond Issuance Market Data (DART/KOFIA/NH PDF)...")
+    # 9. Fetch official bond issuance market data for the PEF channel.
+    logging.info("8. Fetching Bond Issuance Market Data (DART/KOFIA/NH PDF)...")
     bond_market_data = fetch_bond_market_data(
         today,
         allow_wait=not (test_mode or custom_date_run or is_kr_holiday),
     )
 
-    # 9. Generate PEF Briefing
-    logging.info("8. Generating PEF Briefing using Gemini...")
+    # 10. Generate PEF Briefing
+    logging.info("9. Generating PEF Briefing using Gemini...")
     briefing_pef = generate_briefing(
         market_data, 
         combined_pef_context,
@@ -3826,31 +4130,43 @@ def main():
         pef_source_links,
         title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크"
     )
+    watchlist_links_message = build_watchlist_links_message(watchlist_links)
     
-    # 10. Print PEF Briefing to Console
+    # 11. Print PEF Briefing to Console
     logging.info("\n" + "="*50)
     logging.info(briefing_pef) 
     logging.info("="*50 + "\n")
     
-    # 11. Send PEF Briefing to Telegram
+    # 12. Send PEF Briefing to Telegram
     if test_mode:
-         logging.info("9. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
+         logging.info("10. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
          logging.info("   Sending PEF Briefing by Email... [SKIPPED] (Test Mode)")
     else:
-        logging.info("9. Sending PEF Briefing to Telegram...")
+        logging.info("10. Sending PEF Briefing to Telegram...")
         if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
             pef_delivery_complete = False
             if briefing_generation_succeeded(briefing_pef):
                 pef_sent = send_telegram_message(briefing_pef, target="pef")
                 pef_links_sent = not pef_links_message
                 if pef_sent and pef_links_message:
-                    logging.info("10. Sending PEF source links to Telegram...")
+                    logging.info("11. Sending PEF source links to Telegram...")
                     pef_links_sent = send_telegram_message(pef_links_message, target="pef")
-                pef_delivery_complete = pef_sent and pef_links_sent
+                watchlist_links_sent = not watchlist_links_message
+                if pef_sent and pef_links_sent and watchlist_links_message:
+                    logging.info("12. Sending PEF watchlist links to Telegram...")
+                    watchlist_links_sent = send_telegram_message(
+                        watchlist_links_message,
+                        target="pef",
+                    )
+                pef_delivery_complete = (
+                    pef_sent and pef_links_sent and watchlist_links_sent
+                )
             else:
                 logging.error("   Skipping PEF Telegram send because briefing generation failed.")
 
-            pending_pef_delivery = pending_firm_mentions + pending_pef
+            pending_pef_delivery = (
+                pending_firm_mentions + pending_watchlist + pending_pef
+            )
             if pef_delivery_complete:
                 pending_to_commit.extend(pending_pef_delivery)
             elif pending_pef_delivery:
@@ -3860,7 +4176,7 @@ def main():
                 )
         else:
             logging.info("Skipping PEF Telegram send (TELEGRAM_PEF_CHANNEL_ID not found in .env)")
-            if pending_firm_mentions or pending_pef:
+            if pending_firm_mentions or pending_watchlist or pending_pef:
                 logging.warning(
                     "   [News History] PEF channel is not configured; collected PEF articles "
                     "remain uncommitted."
@@ -3872,6 +4188,10 @@ def main():
                 if pef_links_message:
                     pef_email_content = (
                         f"{pef_email_content.rstrip()}\n\n---\n\n{pef_links_message}"
+                    )
+                if watchlist_links_message:
+                    pef_email_content = (
+                        f"{pef_email_content.rstrip()}\n\n---\n\n{watchlist_links_message}"
                     )
                 logging.info("   Sending PEF Briefing by Email...")
                 if not send_email_message(

@@ -1,5 +1,8 @@
 import unittest
+import json
+import tempfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -118,6 +121,7 @@ class HistoryTransactionTests(unittest.TestCase):
     @patch("main.send_telegram_message")
     @patch("main.generate_briefing", side_effect=["<b>general</b>", "<b>pef</b>"])
     @patch("main.fetch_bond_market_data", return_value={"enabled": False})
+    @patch("main.load_pef_watchlist", return_value=[])
     @patch("main.fetch_firm_mention_news")
     @patch("main.fetch_news")
     @patch("main.fetch_market_data", return_value={})
@@ -129,6 +133,7 @@ class HistoryTransactionTests(unittest.TestCase):
         _mock_market,
         mock_fetch_news,
         mock_fetch_firm,
+        _mock_load_watchlist,
         _mock_bond_market,
         _mock_generate,
         mock_send_telegram,
@@ -332,6 +337,164 @@ class PefScheduleTests(unittest.TestCase):
         sleeper.assert_not_called()
 
 
+class NewsScheduleTests(unittest.TestCase):
+    @patch.dict("os.environ", {}, clear=True)
+    def test_monday_uses_weekend_catchup_defaults(self):
+        monday = date(2026, 8, 10)
+
+        settings = main.get_news_fetch_settings("weekday", monday)
+        queries = main.build_news_queries(
+            mode="weekday",
+            target="general",
+            reference_date=monday,
+        )
+
+        self.assertEqual(settings["lookback_days"], 3)
+        self.assertEqual(settings["max_entries_per_query"], 5)
+        self.assertTrue(settings["monday_catchup"])
+        self.assertIn("주말 글로벌 경제 뉴스", queries)
+        self.assertIn("이번주 증시 일정", queries)
+        self.assertIn("이번주 경제 캘린더", queries)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_non_monday_keeps_daily_defaults(self):
+        tuesday = date(2026, 8, 11)
+
+        settings = main.get_news_fetch_settings("weekday", tuesday)
+        queries = main.build_news_queries(
+            mode="weekday",
+            target="general",
+            reference_date=tuesday,
+        )
+
+        self.assertEqual(settings["lookback_days"], 1)
+        self.assertEqual(settings["max_entries_per_query"], 3)
+        self.assertFalse(settings["monday_catchup"])
+        self.assertNotIn("주말 글로벌 경제 뉴스", queries)
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("main.scrape_article_content", return_value="article body")
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_monday_fetch_uses_three_day_window_and_five_entries(
+        self,
+        mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        entries = [
+            SimpleNamespace(
+                title=f"월요일 뉴스 {index} - 연합뉴스",
+                link=f"https://example.com/monday-{index}",
+                published="2026-08-10",
+            )
+            for index in range(6)
+        ]
+        mock_parse_feed.return_value = SimpleNamespace(entries=entries)
+
+        _context, links, _seen, pending, status = main.fetch_news(
+            mode="weekday",
+            target="general",
+            collected_date=date(2026, 8, 10),
+        )
+
+        first_query = mock_get.call_args_list[0].kwargs["params"]["q"]
+        self.assertIn("when:3d", first_query)
+        self.assertEqual(len(links), 5)
+        self.assertEqual(len(pending), 5)
+        self.assertEqual(status["queries_attempted"], 6)
+
+
+class PefWatchlistTests(unittest.TestCase):
+    def test_loads_and_normalizes_watchlist_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            watchlist_path = Path(temp_dir) / "watchlist.json"
+            watchlist_path.write_text(
+                json.dumps(
+                    [
+                        {"name": " 모노틱 ", "aliases": ["모노틱", " Monotic "]},
+                        {
+                            "name": "페퍼저축은행",
+                            "aliases": ["페퍼 저축은행", "Pepper Savings Bank"],
+                        },
+                        {"name": 1234, "aliases": ["invalid"]},
+                    ],
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            watchlist = main.load_pef_watchlist(str(watchlist_path))
+
+        self.assertEqual(
+            watchlist,
+            [
+                {"name": "모노틱", "aliases": ["모노틱", "Monotic"]},
+                {
+                    "name": "페퍼저축은행",
+                    "aliases": [
+                        "페퍼저축은행",
+                        "페퍼 저축은행",
+                        "Pepper Savings Bank",
+                    ],
+                },
+            ],
+        )
+
+    @patch.dict(
+        "os.environ",
+        {
+            "PEF_WATCHLIST_MAX_ARTICLES_PER_COMPANY": "1",
+            "PEF_WATCHLIST_MAX_CANDIDATES_PER_QUERY": "5",
+        },
+        clear=False,
+    )
+    @patch("main.scrape_article_content", return_value="관심 기업 관련 기사 본문")
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_collects_and_groups_news_by_watchlist_company(
+        self,
+        mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        mock_parse_feed.side_effect = [
+            SimpleNamespace(entries=[SimpleNamespace(
+                title="모노틱, 신규 사업 확대 - 연합뉴스",
+                link="https://example.com/monotic",
+                published="2026-08-08",
+            )]),
+            SimpleNamespace(entries=[SimpleNamespace(
+                title="페퍼저축은행, 건전성 관리 강화 - 한국경제",
+                link="https://example.com/pepper",
+                published="2026-08-08",
+            )]),
+        ]
+        watchlist = [
+            {"name": "모노틱", "aliases": ["모노틱"]},
+            {"name": "페퍼저축은행", "aliases": ["페퍼저축은행"]},
+        ]
+
+        context, links, seen, pending, status = main.fetch_watchlist_news(
+            watchlist,
+            collected_date=date(2026, 8, 8),
+        )
+        links_message = main.build_watchlist_links_message(links)
+
+        self.assertEqual([item["company"] for item in links], ["모노틱", "페퍼저축은행"])
+        self.assertEqual({item["target"] for item in pending}, {"pef_watchlist"})
+        self.assertEqual(seen, {"https://example.com/monotic", "https://example.com/pepper"})
+        self.assertEqual(status["queries_attempted"], 2)
+        self.assertIn("Watchlist Company: 모노틱", context)
+        self.assertIn("Watchlist Company: 페퍼저축은행", context)
+        self.assertIn("<b>모노틱</b>", links_message)
+        self.assertIn("<b>페퍼저축은행</b>", links_message)
+        self.assertIn("when:1d", mock_get.call_args_list[0].kwargs["params"]["q"])
+
+    def test_empty_watchlist_links_omit_message(self):
+        self.assertIsNone(main.build_watchlist_links_message([]))
+
+
 class FetchStatusTests(unittest.TestCase):
     @patch("main.requests.get", side_effect=requests.RequestException("network down"))
     def test_all_rss_failures_are_reported_as_outage(self, _mock_get):
@@ -410,6 +573,47 @@ class PefBriefingFormatTests(unittest.TestCase):
         self.assertNotIn("IT PMI", briefing)
         self.assertNotIn("Day-1", briefing)
         self.assertNotIn("TSA", briefing)
+        self.assertNotIn("관심 기업 뉴스 레이더", briefing)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "GEMINI_API_KEY": "test-key",
+            "GEMINI_MODELS": "test-model",
+        },
+        clear=False,
+    )
+    @patch("main.genai.Client")
+    def test_watchlist_prompt_section_is_added_only_for_watchlist_articles(
+        self,
+        mock_client,
+    ):
+        generate_content = mock_client.return_value.models.generate_content
+        generate_content.return_value = SimpleNamespace(text="<b>briefing</b>")
+
+        main.generate_briefing(
+            {},
+            "Title: 일반 PEF 기사\nContent: 일반 기사 본문",
+            target="pef",
+            briefing_date=date(2026, 8, 8),
+        )
+        main.generate_briefing(
+            {},
+            (
+                "--- WATCHLIST ARTICLE START ---\n"
+                "Watchlist Company: 모노틱\n"
+                "Title: 모노틱 신규 사업\n"
+                "--- WATCHLIST ARTICLE END ---"
+            ),
+            target="pef",
+            briefing_date=date(2026, 8, 8),
+        )
+
+        regular_prompt = generate_content.call_args_list[0].kwargs["contents"]
+        watchlist_prompt = generate_content.call_args_list[1].kwargs["contents"]
+        self.assertNotIn("관심 기업 뉴스 레이더", regular_prompt)
+        self.assertIn("관심 기업 뉴스 레이더", watchlist_prompt)
+        self.assertIn("Watchlist Company: 모노틱", watchlist_prompt)
 
 
 class BondMarketTests(unittest.TestCase):
