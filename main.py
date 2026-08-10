@@ -120,8 +120,38 @@ PEF_CATEGORY_LABELS = {
 
 PEF_TRUSTED_SOURCE_KEYWORDS = [
     "연합인포맥스", "연합뉴스", "한국경제", "매일경제", "머니투데이", "더벨",
-    "딜사이트", "reuters", "bloomberg", "financial times", "wsj", "wall street journal"
+    "딜사이트", "레이더m", "마켓인사이트", "인베스트조선", "이데일리", "마켓in",
+    "reuters", "bloomberg", "financial times", "wsj", "wall street journal"
 ]
+
+PEF_SPECIALIST_SOURCE_KEYWORDS = (
+    "더벨", "thebell", "딜사이트", "dealsite", "레이더m", "radar m",
+    "마켓인사이트", "market insight", "인베스트조선", "investchosun",
+    "이데일리마켓in", "이데일리 마켓in", "marketin.edaily",
+)
+
+PEF_SPECIALIST_NEWS_QUERIES = (
+    "site:thebell.co.kr (M&A OR 인수 OR 매각 OR 본입찰 OR PEF)",
+    "site:dealsite.co.kr (M&A OR 인수 OR 매각 OR 본입찰 OR PEF)",
+    "site:mk.co.kr (레이더M OR 레이더엠) (인수 OR 매각 OR 본입찰)",
+    "site:marketinsight.hankyung.com (인수 OR 매각 OR 본입찰 OR PEF)",
+    "site:investchosun.com (인수 OR 매각 OR 본입찰 OR PEF)",
+    "site:marketin.edaily.co.kr (인수 OR 매각 OR 본입찰 OR PEF)",
+)
+
+PEF_SPECIALIST_DEAL_KEYWORDS = (
+    "mbo", "경영진 인수", "인수전", "매각전", "원매자", "숏리스트",
+    "쇼트리스트", "적격인수후보", "인수 후보", "2파전", "3파전", "4파전",
+    "유효경쟁", "백기사", "딜 클로징", "딜클로징", "밸류업", "볼트온",
+    "bolt-on", "애드온", "add-on", "포트폴리오사", "매각 주관",
+)
+
+PEF_BODY_ACCESS_FAILURE_KEYWORDS = (
+    "로그인 후 이용", "로그인 후 열람", "유료회원", "유료 회원", "구독 후",
+    "본문을 보시려면", "기사 전문을 보시려면", "권한이 없습니다",
+    "페이지를 찾을 수 없습니다", "access denied", "subscribe to continue",
+    "sign in to continue", "enable javascript", "javascript를 활성화",
+)
 
 PEF_LOW_SIGNAL_SOURCE_KEYWORDS = [
     "냉동공조저널", "기계신문", "주달", "ipdaily", "pressclub global", "brunch.co.kr",
@@ -200,7 +230,9 @@ PEF_FINANCIAL_PRODUCT_NOISE_KEYWORDS = [
 EVENT_ACTION_ROOTS = (
     "인수", "매각", "합병", "분할", "투자", "유치", "상장", "ipo",
     "회수", "엑시트", "소송", "제재", "승인", "선정", "모집", "통합",
-    "인수금융", "리파이낸싱", "증자", "전환",
+    "인수금융", "리파이낸싱", "증자", "전환", "본입찰", "예비입찰",
+    "우선협상", "인수전", "매각전", "mbo", "2파전", "3파전", "4파전",
+    "유효경쟁", "백기사", "밸류업",
 )
 
 KOREAN_PARTICLE_SUFFIXES = (
@@ -250,7 +282,31 @@ def extract_article_source(title):
     return parts[1].strip() if len(parts) == 2 else "Unknown"
 
 
-def evaluate_pef_article(title, link, content):
+def get_pef_content_access_issue(content):
+    if not content:
+        return "missing_content"
+
+    normalized = re.sub(r"\s+", " ", content).strip()
+    minimum_chars = max(80, parse_int_env("PEF_MIN_BODY_CHARS", 160))
+    if len(normalized) < minimum_chars:
+        return f"content_too_short:{len(normalized)}<{minimum_chars}"
+
+    lowered = normalized.lower()
+    blocked_hits = [
+        keyword for keyword in PEF_BODY_ACCESS_FAILURE_KEYWORDS
+        if keyword in lowered
+    ]
+    if blocked_hits:
+        return f"content_access_blocked:{blocked_hits[0]}"
+
+    return None
+
+
+def is_pef_specialist_query(query):
+    return query in PEF_SPECIALIST_NEWS_QUERIES
+
+
+def evaluate_pef_article(title, link, content, specialist_query=False):
     """
     Score a candidate article for PEF usefulness before it reaches the prompt.
 
@@ -259,7 +315,9 @@ def evaluate_pef_article(title, link, content):
     """
     source = extract_article_source(title)
     headline = normalize_text(title.rsplit(" - ", 1)[0])
+    body = normalize_text(content)
     text = normalize_text(title, content, source, link)
+    content_access_issue = get_pef_content_access_issue(content)
 
     hard_noise_hits = sorted({kw for kw in PEF_HARD_EXCLUDE_KEYWORDS if kw in text})
     soft_noise_hits = sorted({kw for kw in PEF_SOFT_EXCLUDE_KEYWORDS if kw in text})
@@ -273,6 +331,17 @@ def evaluate_pef_article(title, link, content):
     })
     strong_signal_hits = sorted({kw for kw in PEF_STRONG_SIGNAL_KEYWORDS if kw in headline})
     medium_signal_hits = sorted({kw for kw in PEF_MEDIUM_SIGNAL_KEYWORDS if kw in headline})
+    specialist_title_hits = sorted({
+        kw for kw in PEF_SPECIALIST_DEAL_KEYWORDS if kw in headline
+    })
+    specialist_body_hits = sorted({
+        kw for kw in (
+            tuple(PEF_DIRECT_KEYWORDS)
+            + tuple(PEF_TITLE_DEAL_KEYWORDS)
+            + PEF_SPECIALIST_DEAL_KEYWORDS
+        )
+        if kw in body
+    })
 
     categories = []
     category_reason_samples = []
@@ -295,20 +364,31 @@ def evaluate_pef_article(title, link, content):
     if medium_signal_hits:
         score += min(len(medium_signal_hits), 2)
 
-    if content:
+    if content_access_issue is None:
         if len(content) >= 250:
             score += 1
-        elif len(content) < 120:
-            score -= 1
     else:
-        score -= 1
+        score -= 3
 
     source_lower = source.lower()
     trusted_source = any(token.lower() in source_lower for token in PEF_TRUSTED_SOURCE_KEYWORDS)
     low_signal_source = any(token.lower() in source_lower for token in PEF_LOW_SIGNAL_SOURCE_KEYWORDS)
+    specialist_source = any(
+        token.lower() in source_lower or token.lower() in link.lower()
+        for token in PEF_SPECIALIST_SOURCE_KEYWORDS
+    )
+    has_specialist_context = bool(
+        specialist_query
+        and specialist_body_hits
+        and (specialist_title_hits or specialist_body_hits)
+    )
 
     if trusted_source:
         score += 1
+    if specialist_source:
+        score += 1
+    if has_specialist_context:
+        score += 3
     if low_signal_source:
         score -= 2
     if hard_noise_hits:
@@ -316,7 +396,7 @@ def evaluate_pef_article(title, link, content):
     if soft_noise_hits:
         score -= 2
 
-    has_core_signal = bool(direct_pe_hits or deal_title_hits)
+    has_core_signal = bool(direct_pe_hits or deal_title_hits or has_specialist_context)
     has_control_context = any(
         keyword in headline
         for keyword in ("경영권", "최대주주", "인수", "m&a", "사모펀드", "pef")
@@ -329,6 +409,7 @@ def evaluate_pef_article(title, link, content):
         and not is_public_market_noise
         and not is_financial_product_noise
         and not low_signal_source
+        and content_access_issue is None
     )
     promotable = accepted
 
@@ -341,6 +422,10 @@ def evaluate_pef_article(title, link, content):
         reasons.append(f"signal:{', '.join(strong_signal_hits[:3])}")
     if medium_signal_hits:
         reasons.append(f"medium_signal:{', '.join(medium_signal_hits[:3])}")
+    if specialist_title_hits:
+        reasons.append(f"specialist_headline:{', '.join(specialist_title_hits[:3])}")
+    if has_specialist_context:
+        reasons.append(f"specialist_body:{', '.join(specialist_body_hits[:3])}")
     reasons.extend(category_reason_samples[:3])
     if trusted_source:
         reasons.append(f"trusted_source:{source}")
@@ -356,8 +441,8 @@ def evaluate_pef_article(title, link, content):
         reasons.append(f"financial_product_noise:{', '.join(financial_product_noise_hits[:2])}")
     if not has_core_signal:
         reasons.append("no_headline_pef_or_deal_anchor")
-    if not content:
-        reasons.append("missing_content")
+    if content_access_issue:
+        reasons.append(content_access_issue)
 
     return {
         "accepted": accepted,
@@ -366,6 +451,8 @@ def evaluate_pef_article(title, link, content):
         "categories": [PEF_CATEGORY_LABELS.get(category, category) for category in categories],
         "reasons": reasons or ["no_strong_signal"],
         "trusted_source": trusted_source,
+        "specialist_source": specialist_source,
+        "content_accessible": content_access_issue is None,
         "promotable": promotable,
     }
 
@@ -387,6 +474,25 @@ def append_article_context(existing_context, entry, content, target="general", p
         if target == "pef" and pef_meta:
             article_context += f"Category: {', '.join(pef_meta['categories'])}\n"
 
+    return existing_context + article_context
+
+
+def append_corroborating_pef_context(
+    existing_context,
+    entry,
+    content,
+    matched_title,
+    pef_meta,
+):
+    excerpt = re.sub(r"\s+", " ", content or "").strip()[:500]
+    article_context = "\n\n--- CORROBORATING ARTICLE START ---\n"
+    article_context += f"Matched Event: {matched_title}\n"
+    article_context += f"Title: {entry.title}\n"
+    article_context += f"Source: {pef_meta['source']}\n"
+    article_context += f"Link: {entry.link}\n"
+    article_context += f"Category: {', '.join(pef_meta['categories'])}\n"
+    article_context += f"Content excerpt:\n{excerpt}\n"
+    article_context += "--- CORROBORATING ARTICLE END ---\n"
     return existing_context + article_context
 
 
@@ -528,6 +634,11 @@ def build_news_queries(
             "경영권 매각",
             "인수금융 리파이낸싱",
         ]
+        if parse_bool_env("PEF_SPECIALIST_NEWS_ENABLED", True):
+            logging.info(
+                "   [Target] PEF: Adding accessible-body searches for specialist M&A media"
+            )
+            queries = list(PEF_SPECIALIST_NEWS_QUERIES) + queries
 
     return list(dict.fromkeys(queries))
 
@@ -667,12 +778,18 @@ def is_same_news_event(left_title, right_title):
         return False
 
     action_tokens = set(EVENT_ACTION_ROOTS)
+    left_actions = left_tokens & action_tokens
+    right_actions = right_tokens & action_tokens
     common_actions = (left_tokens & right_tokens) & action_tokens
-    if not common_actions:
-        return False
-
     common_tokens = left_tokens & right_tokens
     common_entities = common_tokens - action_tokens
+    if not common_actions:
+        return bool(
+            left_actions
+            and right_actions
+            and any(len(token) >= 4 for token in common_entities)
+        )
+
     if len(common_entities) < 2:
         return False
 
@@ -1070,15 +1187,60 @@ def send_telegram_chunks(url, chat_id, message, parse_mode=None):
     return True, None
 
 
-def build_news_links_message(links, title="🔗 금일 수집된 주요 뉴스 링크"):
+def cluster_news_links_by_event(links):
+    clusters = []
+    for article_title, article_link in links:
+        matched_cluster = None
+        for cluster in clusters:
+            if any(
+                is_same_news_event(article_title, existing_title)
+                for existing_title, _existing_link in cluster
+            ):
+                matched_cluster = cluster
+                break
+        if matched_cluster is None:
+            clusters.append([(article_title, article_link)])
+        else:
+            matched_cluster.append((article_title, article_link))
+    return clusters
+
+
+def build_news_links_message(
+    links,
+    title="🔗 금일 수집된 주요 뉴스 링크",
+    cluster_events=False,
+):
     if not links:
         return None
 
     lines = [f"<b>{html.escape(title)}</b>"]
-    for article_title, article_link in links:
-        safe_title = html.escape(article_title)
-        safe_link = html.escape(article_link, quote=True)
-        lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
+    clusters = cluster_news_links_by_event(links) if cluster_events else [
+        [item] for item in links
+    ]
+    for cluster in clusters:
+        if len(cluster) == 1:
+            article_title, article_link = cluster[0]
+            safe_title = html.escape(article_title)
+            safe_link = html.escape(article_link, quote=True)
+            lines.append(f'- <a href="{safe_link}">{safe_title}</a>')
+            continue
+
+        primary_title = cluster[0][0].rsplit(" - ", 1)[0]
+        lines.append(
+            f"- <b>{html.escape(primary_title)}</b> ({len(cluster)}개 출처)"
+        )
+        source_counts = {}
+        source_links = []
+        for article_title, article_link in cluster:
+            source = extract_article_source(article_title)
+            source_counts[source] = source_counts.get(source, 0) + 1
+            source_label = source
+            if source_counts[source] > 1:
+                source_label = f"{source} {source_counts[source]}"
+            safe_source = html.escape(source_label)
+            safe_link = html.escape(article_link, quote=True)
+            source_links.append(f'<a href="{safe_link}">{safe_source}</a>')
+        lines.append(f"  출처: {' · '.join(source_links)}")
     return "\n".join(lines)
 
 
@@ -3221,13 +3383,26 @@ def fetch_news(
     seen_links = set(initial_seen_links) if initial_seen_links else set()
     seen_title_keys = set()
     accepted_event_titles = []
+    context_event_titles = set()
+    event_source_counts = {}
     collected_links = []
     pending_articles = []
     fetch_status = new_fetch_status(f"{target}_news")
+    max_unique_pef_deals = max(1, parse_int_env("PEF_MAX_UNIQUE_DEALS", 7))
+    max_sources_per_pef_deal = max(
+        1,
+        parse_int_env("PEF_MAX_SOURCES_PER_DEAL", 3),
+    )
     
     logging.info("   Fetching news and scraping content...")
+    if target == "pef":
+        logging.info(
+            f"   [PEF Limits] max_unique_deals={max_unique_pef_deals}, "
+            f"max_prompt_sources_per_deal={max_sources_per_pef_deal}"
+        )
     
     for query in queries:
+        specialist_query = target == "pef" and is_pef_specialist_query(query)
         time_restricted_query = f"{query} when:{lookback_days}d"
         fetch_status["queries_attempted"] += 1
         try:
@@ -3253,7 +3428,7 @@ def fetch_news(
                     entry,
                     news_history,
                     target=target,
-                    seen_title_keys=seen_title_keys
+                    seen_title_keys=None if target == "pef" else seen_title_keys,
                 )
                 if skip_article:
                     logging.info(
@@ -3271,7 +3446,12 @@ def fetch_news(
                 
                 pef_meta = None
                 if target == "pef":
-                    pef_meta = evaluate_pef_article(entry.title, entry.link, content)
+                    pef_meta = evaluate_pef_article(
+                        entry.title,
+                        entry.link,
+                        content,
+                        specialist_query=specialist_query,
+                    )
                     decision = "ACCEPT" if pef_meta["accepted"] else "REJECT"
                     logging.info(
                         f"   [PEF Filter] {decision} score={pef_meta['score']} "
@@ -3283,9 +3463,55 @@ def fetch_news(
 
                 duplicate_title = find_duplicate_event_title(entry.title, accepted_event_titles)
                 if duplicate_title:
+                    if target != "pef":
+                        logging.info(
+                            f"   [Event Dedupe] SKIP same event: {entry.title} "
+                            f"(matched: {duplicate_title})"
+                        )
+                        continue
+
+                    collected_links.append((entry.title, entry.link))
+                    stage_article_for_history(
+                        pending_articles,
+                        entry,
+                        target,
+                        collected_date=collected_date,
+                    )
+                    event_source_counts[duplicate_title] = (
+                        event_source_counts.get(duplicate_title, 1) + 1
+                    )
+                    source_count = event_source_counts[duplicate_title]
+                    if (
+                        duplicate_title in context_event_titles
+                        and source_count <= max_sources_per_pef_deal
+                    ):
+                        combined_news_context = append_corroborating_pef_context(
+                            combined_news_context,
+                            entry,
+                            content,
+                            duplicate_title,
+                            pef_meta,
+                        )
                     logging.info(
-                        f"   [Event Dedupe] SKIP same event: {entry.title} "
+                        f"   [Event Cluster] ADD source {source_count}: {entry.title} "
                         f"(matched: {duplicate_title})"
+                    )
+                    continue
+
+                collected_links.append((entry.title, entry.link))
+                accepted_event_titles.append(entry.title)
+                event_source_counts[entry.title] = 1
+                stage_article_for_history(
+                    pending_articles,
+                    entry,
+                    target,
+                    collected_date=collected_date,
+                )
+
+                if target == "pef" and len(context_event_titles) >= max_unique_pef_deals:
+                    logging.info(
+                        f"   [PEF Limit] LINK ONLY after {max_unique_pef_deals} unique deals: "
+                        f"{entry.title}"
                     )
                     continue
 
@@ -3294,16 +3520,10 @@ def fetch_news(
                     entry,
                     content,
                     target=target,
-                    pef_meta=pef_meta if target == "pef" else None
+                    pef_meta=pef_meta if target == "pef" else None,
                 )
-                collected_links.append((entry.title, entry.link))
-                accepted_event_titles.append(entry.title)
-                stage_article_for_history(
-                    pending_articles,
-                    entry,
-                    target,
-                    collected_date=collected_date,
-                )
+                if target == "pef":
+                    context_event_titles.add(entry.title)
                     
         except Exception as e:
             fetch_status["queries_failed"] += 1
@@ -4691,7 +4911,8 @@ def main():
     
     pef_links_message = build_news_links_message(
         pef_source_links,
-        title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크"
+        title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크",
+        cluster_events=True,
     )
     watchlist_links_message = build_watchlist_links_message(watchlist_links)
     

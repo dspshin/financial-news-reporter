@@ -71,6 +71,51 @@ class PefFilterTests(unittest.TestCase):
         )
         self.assertTrue(result["accepted"])
 
+    @patch.dict("os.environ", {"PEF_MIN_BODY_CHARS": "160"}, clear=False)
+    def test_rejects_missing_short_and_access_blocked_bodies(self):
+        title = "KKR, 국내 소프트웨어 기업 경영권 인수 본입찰 - 더벨"
+        missing = main.evaluate_pef_article(title, "https://example.com/missing", None)
+        short = main.evaluate_pef_article(
+            title,
+            "https://example.com/short",
+            "경영권 인수 기사 요약",
+        )
+        blocked = main.evaluate_pef_article(
+            title,
+            "https://example.com/blocked",
+            "로그인 후 이용 가능한 유료회원 전용 기사입니다. " * 20,
+        )
+
+        self.assertFalse(missing["accepted"])
+        self.assertFalse(short["accepted"])
+        self.assertFalse(blocked["accepted"])
+        self.assertIn("missing_content", missing["reasons"])
+        self.assertTrue(any(reason.startswith("content_too_short") for reason in short["reasons"]))
+        self.assertTrue(any(reason.startswith("content_access_blocked") for reason in blocked["reasons"]))
+
+    def test_accepts_specialist_deal_vocabulary_only_with_confirming_body(self):
+        body = (
+            "사모펀드 하일랜드EP가 인수한 샐러디의 매각을 준비하며 "
+            "멀티브랜드 확장을 통한 밸류업과 투자금 회수를 검토하고 있습니다. "
+        ) * 8
+        accepted = main.evaluate_pef_article(
+            "하일랜드EP, 샐러디 밸류업 '멀티브랜드 확장'에 달렸다 - 더벨",
+            "https://www.thebell.co.kr/example",
+            body,
+            specialist_query=True,
+        )
+        unrelated = main.evaluate_pef_article(
+            "샐러디, 여름 신제품 출시 행사 개최 - 더벨",
+            "https://www.thebell.co.kr/unrelated",
+            "샐러드 신제품과 할인 프로모션을 소개하는 소비자 기사입니다. " * 10,
+            specialist_query=True,
+        )
+
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(unrelated["accepted"])
+        self.assertTrue(accepted["content_accessible"])
+        self.assertTrue(any(reason.startswith("specialist_body") for reason in accepted["reasons"]))
+
 
 class EventDedupeTests(unittest.TestCase):
     def test_matches_different_headlines_for_same_event(self):
@@ -87,6 +132,33 @@ class EventDedupeTests(unittest.TestCase):
         first = 'PEF협의회, 협회로 전환 추진…규제 움직임엔 "적극 소통" - 연합뉴스'
         second = "PEF협의회, 다음달 협회 전환 투표…협회장 인선도 새로 - 이투데이"
         self.assertTrue(main.is_same_news_event(first, second))
+
+    def test_matches_same_deal_across_specialist_headline_styles(self):
+        first = "KDB생명 3파전 압축, 롯데렌탈 딜 향방 촉각 - 더벨"
+        second = "KDB생명 본입찰에 한화·흥국·한투 참여…유효경쟁 성립 - 인베스트조선"
+        self.assertTrue(main.is_same_news_event(first, second))
+
+
+class NewsLinkClusteringTests(unittest.TestCase):
+    def test_clustered_message_preserves_all_source_links(self):
+        links = [
+            (
+                "KDB생명 3파전 압축, 롯데렌탈 딜 향방 촉각 - 더벨",
+                "https://example.com/thebell",
+            ),
+            (
+                "KDB생명 본입찰에 한화·흥국·한투 참여…유효경쟁 성립 - 인베스트조선",
+                "https://example.com/investchosun",
+            ),
+        ]
+
+        message = main.build_news_links_message(links, cluster_events=True)
+
+        self.assertIn("2개 출처", message)
+        self.assertIn("https://example.com/thebell", message)
+        self.assertIn("https://example.com/investchosun", message)
+        self.assertIn(">더벨</a>", message)
+        self.assertIn(">인베스트조선</a>", message)
 
 
 class HistoryTransactionTests(unittest.TestCase):
@@ -398,6 +470,34 @@ class NewsScheduleTests(unittest.TestCase):
         self.assertNotIn("주말 글로벌 경제 뉴스", queries)
 
     @patch.dict("os.environ", {}, clear=True)
+    def test_pef_queries_prioritize_specialist_media_by_default(self):
+        queries = main.build_news_queries(
+            mode="weekday",
+            target="pef",
+            reference_date=date(2026, 8, 11),
+        )
+
+        self.assertEqual(
+            queries[:len(main.PEF_SPECIALIST_NEWS_QUERIES)],
+            list(main.PEF_SPECIALIST_NEWS_QUERIES),
+        )
+        self.assertIn("사모펀드", queries)
+
+    @patch.dict(
+        "os.environ",
+        {"PEF_SPECIALIST_NEWS_ENABLED": "false"},
+        clear=True,
+    )
+    def test_pef_specialist_queries_can_be_disabled(self):
+        queries = main.build_news_queries(
+            mode="weekday",
+            target="pef",
+            reference_date=date(2026, 8, 11),
+        )
+
+        self.assertFalse(any(query.startswith("site:") for query in queries))
+
+    @patch.dict("os.environ", {}, clear=True)
     @patch("main.scrape_article_content", return_value="article body")
     @patch("main.parse_google_news_feed")
     @patch("main.requests.get", return_value=Mock())
@@ -428,6 +528,49 @@ class NewsScheduleTests(unittest.TestCase):
         self.assertEqual(len(links), 5)
         self.assertEqual(len(pending), 5)
         self.assertEqual(status["queries_attempted"], 6)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "PEF_SPECIALIST_NEWS_ENABLED": "false",
+            "PEF_MAX_UNIQUE_DEALS": "1",
+        },
+        clear=False,
+    )
+    @patch(
+        "main.scrape_article_content",
+        return_value="사모펀드가 경영권 인수를 추진하는 거래 관련 기사 본문입니다. " * 10,
+    )
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_pef_unique_deal_limit_keeps_overflow_as_links(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        first = SimpleNamespace(
+            title="KKR, A사 경영권 인수 본입찰 - 더벨",
+            link="https://example.com/a",
+            published="2026-08-11",
+        )
+        second = SimpleNamespace(
+            title="MBK, B사 경영권 인수 본입찰 - 딜사이트",
+            link="https://example.com/b",
+            published="2026-08-11",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[first, second])
+
+        context, links, _seen, pending, _status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 11),
+        )
+
+        self.assertIn(first.title, context)
+        self.assertNotIn(second.title, context)
+        self.assertEqual(links, [(first.title, first.link), (second.title, second.link)])
+        self.assertEqual(len(pending), 2)
 
 
 class PefWatchlistTests(unittest.TestCase):
@@ -553,6 +696,53 @@ class FetchStatusTests(unittest.TestCase):
         self.assertEqual(mock_scrape.call_count, 1)
         self.assertEqual(result[1], [])
         self.assertGreater(result[4]["queries_succeeded"], 1)
+
+
+class PefFetchSelectionTests(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {
+            "PEF_SPECIALIST_NEWS_ENABLED": "true",
+            "PEF_MAX_SOURCES_PER_DEAL": "3",
+        },
+        clear=False,
+    )
+    @patch(
+        "main.scrape_article_content",
+        return_value=(
+            "KDB생명 경영권 매각 본입찰에 사모펀드와 금융회사가 참여했으며 "
+            "인수 후보 간 유효경쟁이 성립한 거래 관련 기사입니다. " * 8
+        ),
+    )
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_same_pef_deal_keeps_corroborating_source_and_link(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        first = SimpleNamespace(
+            title="KDB생명 3파전 압축, 롯데렌탈 딜 향방 촉각 - 더벨",
+            link="https://example.com/thebell-kdb",
+            published="2026-08-10",
+        )
+        second = SimpleNamespace(
+            title="KDB생명 본입찰에 한화·흥국·한투 참여…유효경쟁 성립 - 인베스트조선",
+            link="https://example.com/investchosun-kdb",
+            published="2026-08-10",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[first, second])
+
+        context, links, _seen, pending, _status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 10),
+        )
+
+        self.assertIn("--- CORROBORATING ARTICLE START ---", context)
+        self.assertEqual(links, [(first.title, first.link), (second.title, second.link)])
+        self.assertEqual(len(pending), 2)
 
 
 class MarketPerformanceTests(unittest.TestCase):
