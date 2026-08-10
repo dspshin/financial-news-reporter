@@ -412,7 +412,7 @@ class PefWatchlistTests(unittest.TestCase):
             watchlist_path.write_text(
                 json.dumps(
                     [
-                        {"name": " 모노틱 ", "aliases": ["모노틱", " Monotic "]},
+                        {"name": " 모토닉 ", "aliases": ["모토닉", " Motonic "]},
                         {
                             "name": "페퍼저축은행",
                             "aliases": ["페퍼 저축은행", "Pepper Savings Bank"],
@@ -429,7 +429,7 @@ class PefWatchlistTests(unittest.TestCase):
         self.assertEqual(
             watchlist,
             [
-                {"name": "모노틱", "aliases": ["모노틱", "Monotic"]},
+                {"name": "모토닉", "aliases": ["모토닉", "Motonic"]},
                 {
                     "name": "페퍼저축은행",
                     "aliases": [
@@ -460,7 +460,7 @@ class PefWatchlistTests(unittest.TestCase):
     ):
         mock_parse_feed.side_effect = [
             SimpleNamespace(entries=[SimpleNamespace(
-                title="모노틱, 신규 사업 확대 - 연합뉴스",
+                title="모토닉, 신규 사업 확대 - 연합뉴스",
                 link="https://example.com/monotic",
                 published="2026-08-08",
             )]),
@@ -471,7 +471,7 @@ class PefWatchlistTests(unittest.TestCase):
             )]),
         ]
         watchlist = [
-            {"name": "모노틱", "aliases": ["모노틱"]},
+            {"name": "모토닉", "aliases": ["모토닉"]},
             {"name": "페퍼저축은행", "aliases": ["페퍼저축은행"]},
         ]
 
@@ -481,13 +481,13 @@ class PefWatchlistTests(unittest.TestCase):
         )
         links_message = main.build_watchlist_links_message(links)
 
-        self.assertEqual([item["company"] for item in links], ["모노틱", "페퍼저축은행"])
+        self.assertEqual([item["company"] for item in links], ["모토닉", "페퍼저축은행"])
         self.assertEqual({item["target"] for item in pending}, {"pef_watchlist"})
         self.assertEqual(seen, {"https://example.com/monotic", "https://example.com/pepper"})
         self.assertEqual(status["queries_attempted"], 2)
-        self.assertIn("Watchlist Company: 모노틱", context)
+        self.assertIn("Watchlist Company: 모토닉", context)
         self.assertIn("Watchlist Company: 페퍼저축은행", context)
-        self.assertIn("<b>모노틱</b>", links_message)
+        self.assertIn("<b>모토닉</b>", links_message)
         self.assertIn("<b>페퍼저축은행</b>", links_message)
         self.assertIn("when:1d", mock_get.call_args_list[0].kwargs["params"]["q"])
 
@@ -601,8 +601,8 @@ class PefBriefingFormatTests(unittest.TestCase):
             {},
             (
                 "--- WATCHLIST ARTICLE START ---\n"
-                "Watchlist Company: 모노틱\n"
-                "Title: 모노틱 신규 사업\n"
+                "Watchlist Company: 모토닉\n"
+                "Title: 모토닉 신규 사업\n"
                 "--- WATCHLIST ARTICLE END ---"
             ),
             target="pef",
@@ -613,7 +613,7 @@ class PefBriefingFormatTests(unittest.TestCase):
         watchlist_prompt = generate_content.call_args_list[1].kwargs["contents"]
         self.assertNotIn("관심 기업 뉴스 레이더", regular_prompt)
         self.assertIn("관심 기업 뉴스 레이더", watchlist_prompt)
-        self.assertIn("Watchlist Company: 모노틱", watchlist_prompt)
+        self.assertIn("Watchlist Company: 모토닉", watchlist_prompt)
 
 
 class BondMarketTests(unittest.TestCase):
