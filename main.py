@@ -139,6 +139,8 @@ DEFAULT_PEF_WATCHLIST_FILE = "pef_watchlist.json"
 DEFAULT_NEWS_HISTORY_FILE = ".news_history.json"
 DEFAULT_NEWS_HISTORY_RETENTION_DAYS = 30
 DEFAULT_NEWS_HISTORY_TITLE_MATCH_DAYS = 7
+DEFAULT_BOND_HISTORY_FILE = ".bond_history.json"
+BOND_HISTORY_VERSION = 1
 DEFAULT_GEMINI_MODELS = (
     "gemini-3.6-flash",
     "gemini-3.5-flash",
@@ -165,6 +167,10 @@ KOFIA_MEZZANINE_BOND_KEYWORDS = (
 KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS = (
     "유동화전문", "제일차", "제이차", "제삼차", "제사차", "제오차",
     "제육차", "제칠차", "제팔차", "제구차", "제십차",
+)
+KOFIA_PRIORITY_PENDING_CORPORATE_KEYWORDS = (
+    "금융지주", "투자증권", "증권", "생명보험", "손해보험", "보험",
+    "에프앤아이",
 )
 KOFIA_ROUTINE_POLICY_BANK_ISSUERS = {
     "산업은행", "기업은행", "수출입은행", "농협은행",
@@ -1613,12 +1619,12 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
     first_row_pattern = re.compile(
         r"^\s*(?P<issuer>\S(?:.*?\S)?)\s{2,}"
         rf"(?P<rating>{rating_pattern})\s+"
-        r"(?P<term>\d+(?:\.\d+)?|\d+NC\d+)\s+"
+        r"(?P<term>\d+(?:\.\d+)?|\d+NC\d+)(?P<amount_gap>\s+)"
         r"(?P<amount>[\d,]+|금액\s*미정)(?P<rest>.*)$"
     )
     continuation_pattern = re.compile(
-        r"^\s{20,}(?P<term>\d+(?:\.\d+)?)\s+"
-        r"(?P<amount>[\d,]+)(?P<rest>.*)$"
+        r"^\s{20,}(?P<term>\d+(?:\.\d+)?)"
+        r"(?:(?P<amount_gap>\s+)(?P<amount>[\d,]+))?(?P<rest>.*)$"
     )
     schedule_pattern = re.compile(
         r"(?P<demand>\d{1,2}/\d{1,2}\([^)]+\)|미정)\s+"
@@ -1640,6 +1646,9 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
             schedule_match = schedule_pattern.search(rest)
             manager_match = manager_pattern.search(rest)
             amount_area = rest[:manager_match.start()] if manager_match else ""
+            amount_is_in_expected_column = len(first_match.group("amount_gap")) <= 20
+            if not amount_is_in_expected_column:
+                amount_area = first_match.group("amount") + " " + amount_area
             amount_candidates = [
                 int(value.replace(",", ""))
                 for value in re.findall(r"\d[\d,]*", amount_area)
@@ -1653,7 +1662,10 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
             first_amount_text = normalize_whitespace(first_match.group("amount"))
             first_amount = (
                 int(first_amount_text.replace(",", ""))
-                if re.fullmatch(r"[\d,]+", first_amount_text)
+                if (
+                    amount_is_in_expected_column
+                    and re.fullmatch(r"[\d,]+", first_amount_text)
+                )
                 else None
             )
             current = {
@@ -1690,8 +1702,12 @@ def parse_nh_syndication_text(text, reference_date, pdf_url):
         continuation_match = continuation_pattern.match(line)
         if continuation_match and current:
             current["terms"].append(continuation_match.group("term"))
+            continuation_amount = continuation_match.group("amount")
+            amount_gap = continuation_match.group("amount_gap") or ""
             current["amounts"].append(
-                int(continuation_match.group("amount").replace(",", ""))
+                int(continuation_amount.replace(",", ""))
+                if continuation_amount and len(amount_gap) <= 20
+                else None
             )
 
     events = []
@@ -1764,9 +1780,8 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
     reference_date = reference_date or datetime.now().date()
     timeout = max(15, parse_int_env("NH_PDF_TIMEOUT_SECONDS", 90))
     lookback_days = max(0, parse_int_env("NH_PDF_LOOKBACK_DAYS", 3))
-    lookahead_days = max(1, parse_int_env("BOND_DART_LOOKAHEAD_DAYS", 14))
     planned_lookahead_days = max(
-        lookahead_days,
+        1,
         parse_int_env("NH_PDF_PLANNED_LOOKAHEAD_DAYS", 45),
     )
     result = {
@@ -1800,14 +1815,13 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 reference_date=reference_date,
                 pdf_url=pdf_url,
             )
-            end_date = reference_date + timedelta(days=lookahead_days)
             planned_end_date = reference_date + timedelta(days=planned_lookahead_days)
             events = [
                 event
                 for event in events
                 if (
                     event.get("demand_date")
-                    and reference_date <= event["demand_date"] <= end_date
+                    and reference_date <= event["demand_date"] <= planned_end_date
                 )
                 or (
                     not event.get("demand_date")
@@ -1956,7 +1970,23 @@ def is_major_kofia_record(record):
     if record.get("issuer") in KOFIA_ROUTINE_POLICY_BANK_ISSUERS:
         return False
     if record.get("amount_eok", 0) <= 0 and record.get("category") == "회사채":
-        return False
+        issuer = normalize_whitespace(record.get("issuer", ""))
+        configured_issuers = {
+            normalize_whitespace(value)
+            for value in os.getenv(
+                "BOND_KOFIA_PENDING_COMPANY_ALLOWLIST",
+                "",
+            ).split(",")
+            if normalize_whitespace(value)
+        }
+        if (
+            issuer not in configured_issuers
+            and not any(
+                keyword in issuer
+                for keyword in KOFIA_PRIORITY_PENDING_CORPORATE_KEYWORDS
+            )
+        ):
+            return False
     return True
 
 
@@ -2288,6 +2318,451 @@ def merge_bond_demand_events(dart_items, nh_items):
     )
 
 
+def get_bond_history_path():
+    return os.getenv("BOND_HISTORY_FILE", DEFAULT_BOND_HISTORY_FILE)
+
+
+def build_bond_history_state(events=None, path=None, initialized=False):
+    return {
+        "path": path or get_bond_history_path(),
+        "initialized": initialized,
+        "events": events or {},
+    }
+
+
+def load_bond_history():
+    path = get_bond_history_path()
+    try:
+        with open(path, "r", encoding="utf-8") as history_file:
+            raw_data = json.load(history_file)
+    except FileNotFoundError:
+        logging.info(
+            f"   [Bond History] No history file found. Starting baseline: {path}"
+        )
+        return build_bond_history_state(path=path)
+    except (OSError, json.JSONDecodeError) as error:
+        logging.warning(
+            f"   [Bond History] Could not load {path}: {error}. "
+            "Starting baseline."
+        )
+        return build_bond_history_state(path=path)
+
+    raw_events = raw_data.get("events", {}) if isinstance(raw_data, dict) else {}
+    events = {
+        key: record
+        for key, record in raw_events.items()
+        if isinstance(key, str)
+        and isinstance(record, dict)
+        and isinstance(record.get("event"), dict)
+    }
+    logging.info(f"   [Bond History] Loaded {len(events)} tracked schedule(s).")
+    return build_bond_history_state(
+        events=events,
+        path=path,
+        initialized=True,
+    )
+
+
+def save_bond_history(history):
+    if not history:
+        return False
+
+    path = history.get("path") or get_bond_history_path()
+    payload = {
+        "version": BOND_HISTORY_VERSION,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "events": history.get("events", {}),
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as history_file:
+            json.dump(payload, history_file, ensure_ascii=False, indent=2)
+        logging.info(
+            f"   [Bond History] Saved {len(payload['events'])} schedule(s) to {path}."
+        )
+        return True
+    except OSError as error:
+        logging.error(f"   [Bond History] Failed to save {path}: {error}")
+        return False
+
+
+def commit_bond_history_after_delivery(
+    schedule_digest,
+    delivery_configured,
+    delivery_complete,
+    saver=None,
+):
+    pending_history = (
+        schedule_digest
+        and schedule_digest.get("next_history")
+    )
+    if not pending_history:
+        return False
+    if delivery_configured and delivery_complete:
+        return (saver or save_bond_history)(pending_history)
+
+    logging.warning(
+        "   [Bond History] PEF delivery incomplete or no delivery channel "
+        "configured; schedule snapshot remains uncommitted for retry."
+    )
+    return False
+
+
+def bond_history_date_value(value):
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    parsed = parse_history_date(value)
+    return parsed.isoformat() if parsed else None
+
+
+def bond_event_identity_key(event):
+    issuer_key = normalize_bond_issuer_key(event.get("issuer", ""))
+    if not issuer_key:
+        return ""
+
+    descriptor = normalize_whitespace(
+        f"{event.get('issuer', '')} {event.get('security_type', '')}"
+    )
+    security_markers = []
+    if "신종" in descriptor or "조건부자본" in descriptor:
+        security_markers.append("hybrid")
+    if "후순위" in descriptor:
+        security_markers.append("subordinated")
+    if "지급보증" in descriptor or (
+        "보증" in descriptor and "무보증" not in descriptor
+    ):
+        security_markers.append("guaranteed")
+    security_key = ",".join(security_markers) or "regular"
+    return f"{issuer_key}|{security_key}"
+
+
+def snapshot_bond_event(event):
+    tranches = []
+    for tranche in event.get("tranches") or []:
+        tranches.append({
+            "term": normalize_whitespace(tranche.get("term", "")),
+            "amount_eok": tranche.get("amount_eok"),
+        })
+    managers = sorted({
+        normalize_whitespace(manager)
+        for manager in event.get("managers") or []
+        if normalize_whitespace(manager)
+    })
+    return {
+        "issuer": normalize_whitespace(event.get("issuer", "")),
+        "rating": normalize_whitespace(event.get("rating", "")) or None,
+        "term": compact_bond_term_text(event.get("term")),
+        "tranches": tranches,
+        "managers": managers,
+        "security_type": (
+            normalize_whitespace(event.get("security_type", "")) or None
+        ),
+        "amount_eok": event.get("amount_eok"),
+        "max_amount_eok": event.get("max_amount_eok"),
+        "demand_date": bond_history_date_value(event.get("demand_date")),
+        "payment_date": bond_history_date_value(event.get("payment_date")),
+        "start_time": event.get("start_time"),
+        "end_time": event.get("end_time"),
+        "rate_band": normalize_whitespace(event.get("rate_band", "")) or None,
+    }
+
+
+def bond_event_fingerprint(snapshot):
+    comparable_snapshot = dict(snapshot)
+    comparable_snapshot.pop("issuer", None)
+    return json.dumps(
+        comparable_snapshot,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def format_bond_history_date(value):
+    parsed = parse_history_date(value)
+    return parsed.strftime("%m/%d") if parsed else "미정"
+
+
+def format_bond_history_amount(value):
+    return format_eok_amount(value) or "미정"
+
+
+def format_bond_history_tranches(tranches):
+    values = []
+    for tranche in tranches or []:
+        term = tranche.get("term") or "만기 미정"
+        if re.fullmatch(r"\d+(?:\.\d+)?", term):
+            term += "년"
+        values.append(
+            f"{term} {format_bond_history_amount(tranche.get('amount_eok'))}"
+        )
+    return " / ".join(values) or "미정"
+
+
+def describe_bond_event_changes(previous, current):
+    changes = []
+    field_specs = (
+        ("demand_date", "수요예측", format_bond_history_date),
+        ("payment_date", "발행일", format_bond_history_date),
+        ("amount_eok", "발행액", format_bond_history_amount),
+        ("max_amount_eok", "최대 발행액", format_bond_history_amount),
+        ("term", "만기", lambda value: value or "미정"),
+        ("rating", "등급", lambda value: value or "미정"),
+        ("security_type", "채권 유형", lambda value: value or "미정"),
+        (
+            "managers",
+            "대표주관",
+            lambda value: " / ".join(value or []) or "미정",
+        ),
+        ("start_time", "수요예측 시작", lambda value: value or "미정"),
+        ("end_time", "수요예측 종료", lambda value: value or "미정"),
+        ("rate_band", "밴드", lambda value: value or "미정"),
+    )
+    for field, label, formatter in field_specs:
+        if previous.get(field) == current.get(field):
+            continue
+        changes.append(
+            f"{label} {formatter(previous.get(field))} → "
+            f"{formatter(current.get(field))}"
+        )
+
+    if (
+        previous.get("tranches") != current.get("tranches")
+        and previous.get("term") == current.get("term")
+        and previous.get("amount_eok") == current.get("amount_eok")
+    ):
+        changes.append(
+            "만기별 금액 "
+            f"{format_bond_history_tranches(previous.get('tranches'))} → "
+            f"{format_bond_history_tranches(current.get('tranches'))}"
+        )
+    return changes
+
+
+def get_bond_event_anchor_date(event):
+    value = event.get("demand_date") or event.get("payment_date")
+    if hasattr(value, "year"):
+        return value
+    return parse_history_date(value)
+
+
+def collect_bond_schedule_candidates(bond_market_data, reference_date):
+    dart_result = bond_market_data.get("dart") or {"items": []}
+    nh_result = bond_market_data.get("nh") or {"items": []}
+    demand_events = merge_bond_demand_events(
+        dart_result.get("items", []),
+        nh_result.get("items", []),
+    )
+    today_events = [
+        event
+        for event in demand_events
+        if event.get("demand_date") == reference_date
+    ]
+    future_events = [
+        event
+        for event in demand_events
+        if event.get("demand_date") and event["demand_date"] > reference_date
+    ]
+    undated_events = [
+        event
+        for event in nh_result.get("items", [])
+        if not event.get("demand_date")
+    ]
+    nh_led_future_events = [
+        event
+        for event in future_events + undated_events
+        if "NH" in (event.get("managers") or [])
+    ]
+
+    unique_candidates = []
+    detail_keys = set()
+    for event in today_events + nh_led_future_events:
+        key = (
+            bond_event_identity_key(event),
+            event.get("demand_date"),
+            event.get("payment_date"),
+        )
+        if not key[0] or key in detail_keys:
+            continue
+        detail_keys.add(key)
+        unique_candidates.append(event)
+    return demand_events, today_events, unique_candidates
+
+
+def select_bond_history_source_event(event, nh_items):
+    identity_key = bond_event_identity_key(event)
+    matches = [
+        nh_event
+        for nh_event in nh_items or []
+        if bond_event_identity_key(nh_event) == identity_key
+    ]
+    if not matches:
+        return event
+
+    demand_date = event.get("demand_date")
+    payment_date = event.get("payment_date")
+    for nh_event in matches:
+        if demand_date and nh_event.get("demand_date") == demand_date:
+            return nh_event
+        if (
+            not demand_date
+            and payment_date
+            and nh_event.get("payment_date") == payment_date
+        ):
+            return nh_event
+    return matches[0]
+
+
+def bond_schedule_snapshot_reliable(bond_market_data, reference_date):
+    nh_result = bond_market_data.get("nh") or {}
+    source_date = nh_result.get("source_date")
+    if isinstance(source_date, str):
+        source_date = parse_history_date(source_date)
+    return (
+        source_date == reference_date
+        and nh_result.get("status") in {"ok", "empty"}
+    )
+
+
+def prepare_bond_schedule_digest(
+    bond_market_data,
+    bond_history,
+    reference_date=None,
+):
+    if not bond_market_data or not bond_history:
+        return None
+
+    reference_date = (
+        reference_date
+        or bond_market_data.get("reference_date")
+        or datetime.now().date()
+    )
+    _, _, candidates = collect_bond_schedule_candidates(
+        bond_market_data,
+        reference_date,
+    )
+    reliable = bond_schedule_snapshot_reliable(
+        bond_market_data,
+        reference_date,
+    )
+    if not reliable:
+        logging.warning(
+            "   [Bond History] Current NH snapshot is unavailable or stale; "
+            "comparison and history update skipped."
+        )
+        return {
+            "reliable": False,
+            "candidates": candidates,
+            "next_history": None,
+        }
+
+    baseline = not bond_history.get("initialized", False)
+    previous_events = bond_history.get("events", {})
+    nh_items = (bond_market_data.get("nh") or {}).get("items", [])
+    current_keys = set()
+    next_events = {}
+    digest = {
+        "reliable": True,
+        "baseline": baseline,
+        "baseline_events": [],
+        "new_events": [],
+        "changed_events": [],
+        "restored_events": [],
+        "today_events": [],
+        "unchanged_events": [],
+        "missing_alerts": [],
+    }
+
+    for event in candidates:
+        key = bond_event_identity_key(event)
+        if not key:
+            continue
+        if key in current_keys:
+            suffix = bond_history_date_value(
+                event.get("demand_date") or event.get("payment_date")
+            )
+            key = f"{key}|{suffix or len(current_keys)}"
+            logging.warning(
+                f"   [Bond History] Multiple active schedules share an identity: {key}"
+            )
+        current_keys.add(key)
+        history_source_event = select_bond_history_source_event(event, nh_items)
+        snapshot = snapshot_bond_event(history_source_event)
+        fingerprint = bond_event_fingerprint(snapshot)
+        previous_record = previous_events.get(key)
+        next_events[key] = {
+            "event": snapshot,
+            "fingerprint": fingerprint,
+            "last_seen_at": reference_date.isoformat(),
+            "missing_count": 0,
+        }
+
+        if baseline:
+            digest["baseline_events"].append(event)
+            continue
+        if not previous_record:
+            digest["new_events"].append(event)
+            continue
+
+        previous_snapshot = previous_record.get("event", {})
+        changes = describe_bond_event_changes(previous_snapshot, snapshot)
+        if previous_record.get("missing_count", 0) > 0:
+            digest["restored_events"].append({
+                "event": event,
+                "changes": changes,
+            })
+        elif previous_record.get("fingerprint") != fingerprint:
+            digest["changed_events"].append({
+                "event": event,
+                "changes": changes,
+            })
+        elif get_bond_event_anchor_date(event) == reference_date:
+            digest["today_events"].append(event)
+        else:
+            digest["unchanged_events"].append(event)
+
+    missing_confirmations = max(
+        1,
+        parse_int_env("BOND_HISTORY_MISSING_CONFIRMATIONS", 2),
+    )
+    for key, previous_record in previous_events.items():
+        if key in current_keys:
+            continue
+        previous_snapshot = previous_record.get("event", {})
+        anchor_date = get_bond_event_anchor_date(previous_snapshot)
+        if anchor_date and anchor_date < reference_date:
+            continue
+
+        missing_count = int(previous_record.get("missing_count", 0)) + 1
+        next_record = dict(previous_record)
+        next_record["missing_count"] = missing_count
+        next_record["last_checked_at"] = reference_date.isoformat()
+        next_events[key] = next_record
+        if missing_count == missing_confirmations:
+            digest["missing_alerts"].append({
+                "event": previous_snapshot,
+                "missing_count": missing_count,
+            })
+
+    digest["next_history"] = build_bond_history_state(
+        events=next_events,
+        path=bond_history.get("path"),
+        initialized=True,
+    )
+    logging.info(
+        "   [Bond History] "
+        f"baseline={len(digest['baseline_events'])}, "
+        f"new={len(digest['new_events'])}, "
+        f"changed={len(digest['changed_events'])}, "
+        f"restored={len(digest['restored_events'])}, "
+        f"today={len(digest['today_events'])}, "
+        f"unchanged={len(digest['unchanged_events'])}, "
+        f"missing_alerts={len(digest['missing_alerts'])}."
+    )
+    return digest
+
+
 def compact_bond_term_text(term):
     parts = [
         value.strip().removesuffix("년")
@@ -2333,22 +2808,29 @@ def format_nh_mail_schedule_line(event):
 def format_tranche_amounts(event):
     tranches = event.get("tranches") or []
     tranche_texts = []
-    for tranche in tranches:
-        term = tranche.get("term", "")
-        term_text = (
-            f"{term}년"
-            if re.fullmatch(r"\d+(?:\.\d+)?", term)
-            else term
-        )
-        amount = tranche.get("amount_eok")
-        amount_text = format_eok_amount(amount) if amount is not None else "금액 미정"
-        tranche_texts.append(f"{term_text} {amount_text}".strip())
+    has_complete_tranche_amounts = (
+        len(tranches) == 1
+        or all(tranche.get("amount_eok") is not None for tranche in tranches)
+    )
+    if has_complete_tranche_amounts:
+        for tranche in tranches:
+            term = tranche.get("term", "")
+            term_text = (
+                f"{term}년"
+                if re.fullmatch(r"\d+(?:\.\d+)?", term)
+                else term
+            )
+            amount = tranche.get("amount_eok")
+            amount_text = (
+                format_eok_amount(amount) if amount is not None else "금액 미정"
+            )
+            tranche_texts.append(f"{term_text} {amount_text}".strip())
 
     if tranche_texts:
         result = " / ".join(tranche_texts)
     else:
         term = compact_bond_term_text(event.get("term"))
-        amount = format_eok_amount(event.get("amount_eok"))
+        amount = format_eok_amount(event.get("amount_eok")) or "금액 미정"
         result = " ".join(value for value in (term, amount) if value)
 
     if event.get("max_amount_eok"):
@@ -2356,11 +2838,20 @@ def format_tranche_amounts(event):
     return result
 
 
-def format_nh_mail_detail(event):
+def format_nh_mail_detail(event, status_label=None, changes=None):
     title = format_bond_event_link(event)
     if event.get("rating"):
         title += f" ({html.escape(event['rating'])})"
+    if status_label:
+        title = f"[{html.escape(status_label)}] {title}"
     lines = [f"<b>■ {title}</b>"]
+
+    if changes:
+        visible_changes = changes[:4]
+        change_text = "; ".join(html.escape(change) for change in visible_changes)
+        if len(changes) > len(visible_changes):
+            change_text += f"; 외 {len(changes) - len(visible_changes)}건"
+        lines.append(f"- 변경: {change_text}")
 
     amount_text = format_tranche_amounts(event)
     if amount_text:
@@ -2393,7 +2884,11 @@ def get_kofia_mail_category_names(kofia_result, category):
     return names
 
 
-def build_bond_market_section(bond_market_data, reference_date=None):
+def build_bond_market_section(
+    bond_market_data,
+    reference_date=None,
+    schedule_digest=None,
+):
     if not bond_market_data or not bond_market_data.get("enabled", True):
         return ""
 
@@ -2418,9 +2913,9 @@ def build_bond_market_section(bond_market_data, reference_date=None):
         "items": [],
         "pdf_url": build_nh_syndication_pdf_url(reference_date),
     }
-    demand_events = merge_bond_demand_events(
-        dart_result.get("items", []),
-        nh_result.get("items", []),
+    demand_events, today_events, detail_candidates = collect_bond_schedule_candidates(
+        bond_market_data,
+        reference_date,
     )
     lines = [
         "---",
@@ -2473,17 +2968,6 @@ def build_bond_market_section(bond_market_data, reference_date=None):
         )
 
     lines.extend(["", "<b>[ 금일 주요 일정 ]</b>"])
-    today_events = [
-        event
-        for event in demand_events
-        if event.get("demand_date") == reference_date
-    ]
-    future_events = [
-        event
-        for event in demand_events
-        if event.get("demand_date") and event["demand_date"] > reference_date
-    ]
-
     if today_events:
         lines.extend(format_nh_mail_schedule_line(event) for event in today_events)
     elif (
@@ -2505,34 +2989,88 @@ def build_bond_market_section(bond_market_data, reference_date=None):
     elif nh_result.get("status") in {"error", "unavailable"}:
         lines.append("※ NH 당일 예정표를 확인하지 못함")
 
-    undated_events = [
-        event
-        for event in nh_result.get("items", [])
-        if not event.get("demand_date")
-    ]
-    nh_led_future_events = [
-        event
-        for event in future_events + undated_events
-        if "NH" in (event.get("managers") or [])
-    ]
-    detail_candidates = today_events + nh_led_future_events
-    unique_details = []
-    detail_keys = set()
-    for event in detail_candidates:
-        key = (
-            normalize_bond_issuer_key(event.get("issuer", "")),
-            event.get("demand_date"),
-            event.get("payment_date"),
-        )
-        if key in detail_keys:
-            continue
-        detail_keys.add(key)
-        unique_details.append(event)
+    max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
+    digest_reliable = schedule_digest and schedule_digest.get("reliable")
+    if digest_reliable:
+        detail_entries = []
+        if schedule_digest.get("baseline"):
+            lines.extend(["", "<b>[ 기준 예정 일정 ]</b>"])
+            detail_entries.extend(
+                ("기준", event, [])
+                for event in schedule_digest.get("baseline_events", [])
+            )
+            if not detail_entries:
+                lines.append("- 확인된 예정 일정 없음")
+        else:
+            detail_entries.extend(
+                ("신규", event, [])
+                for event in schedule_digest.get("new_events", [])
+            )
+            detail_entries.extend(
+                ("변경", item["event"], item.get("changes", []))
+                for item in schedule_digest.get("changed_events", [])
+            )
+            detail_entries.extend(
+                ("재확인", item["event"], item.get("changes", []))
+                for item in schedule_digest.get("restored_events", [])
+            )
+            detail_entries.extend(
+                ("당일", event, [])
+                for event in schedule_digest.get("today_events", [])
+            )
+            lines.extend(["", "<b>[ 신규·변경 예정 일정 ]</b>"])
+            if not detail_entries:
+                lines.append("- 신규·변경 일정 없음")
 
-    max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 4))
-    for event in unique_details[:max_details]:
-        lines.append("")
-        lines.extend(format_nh_mail_detail(event))
+        for status_label, event, changes in detail_entries[:max_details]:
+            lines.append("")
+            lines.extend(
+                format_nh_mail_detail(
+                    event,
+                    status_label=status_label,
+                    changes=changes,
+                )
+            )
+        if len(detail_entries) > max_details:
+            lines.append(
+                f"※ 상세 표시 한도로 {len(detail_entries) - max_details}건 생략"
+            )
+
+        unchanged_events = schedule_digest.get("unchanged_events", [])
+        if unchanged_events:
+            unchanged_names = list(dict.fromkeys(
+                event.get("issuer", "")
+                for event in unchanged_events
+                if event.get("issuer")
+            ))
+            visible_names = unchanged_names[:max_details]
+            name_text = ", ".join(html.escape(name) for name in visible_names)
+            if len(unchanged_names) > len(visible_names):
+                name_text += f", 외 {len(unchanged_names) - len(visible_names)}개"
+            lines.extend([
+                "",
+                "<b>[ 기존 일정 유지 ]</b>",
+                f"- {len(unchanged_names)}건: {name_text}",
+            ])
+
+        missing_alerts = schedule_digest.get("missing_alerts", [])
+        if missing_alerts:
+            lines.extend(["", "<b>[ 일정 재확인 필요 ]</b>"])
+            for item in missing_alerts:
+                event = item.get("event", {})
+                issuer = html.escape(event.get("issuer", "발행사 미상"))
+                schedule_date = format_bond_history_date(
+                    event.get("demand_date") or event.get("payment_date")
+                )
+                lines.append(
+                    f"- {issuer}: NH 예정표에서 "
+                    f"{item.get('missing_count', 0)}회 연속 미확인 "
+                    f"(기존 일정 {schedule_date})"
+                )
+    else:
+        for event in detail_candidates[:max_details]:
+            lines.append("")
+            lines.extend(format_nh_mail_detail(event))
 
     nh_source_url = html.escape(
         nh_result.get("pdf_url") or build_nh_syndication_pdf_url(reference_date),
@@ -4103,6 +4641,30 @@ def main():
         today,
         allow_wait=not (test_mode or custom_date_run or is_kr_holiday),
     )
+    bond_history = None
+    bond_schedule_digest = None
+    bond_history_enabled = (
+        parse_bool_env("BOND_HISTORY_ENABLED", True)
+        and "--no-bond-history" not in args
+    )
+    if bond_market_data.get("enabled") and bond_history_enabled:
+        if custom_date_run:
+            logging.info(
+                "   [Bond History] Custom-date run: comparison and save disabled."
+            )
+        else:
+            bond_history = load_bond_history()
+            bond_schedule_digest = prepare_bond_schedule_digest(
+                bond_market_data,
+                bond_history,
+                reference_date=today,
+            )
+            if test_mode:
+                logging.info(
+                    "   [Bond History] Test mode: history will be read but not saved."
+                )
+    elif bond_market_data.get("enabled"):
+        logging.info("   [Bond History] Disabled for this run.")
 
     # 10. Generate PEF Briefing
     logging.info("9. Generating PEF Briefing using Gemini...")
@@ -4122,6 +4684,7 @@ def main():
         bond_market_section = build_bond_market_section(
             bond_market_data,
             reference_date=today,
+            schedule_digest=bond_schedule_digest,
         )
         if bond_market_section:
             briefing_pef = f"{briefing_pef.rstrip()}\n\n{bond_market_section}"
@@ -4138,12 +4701,16 @@ def main():
     logging.info("="*50 + "\n")
     
     # 12. Send PEF Briefing to Telegram
+    pef_telegram_configured = bool(os.getenv("TELEGRAM_PEF_CHANNEL_ID"))
+    pef_email_configured = email_target_enabled("pef")
+    pef_telegram_delivery_complete = not pef_telegram_configured
+    pef_email_delivery_complete = not pef_email_configured
     if test_mode:
          logging.info("10. Sending PEF Briefing to Telegram... [SKIPPED] (Test Mode)")
          logging.info("   Sending PEF Briefing by Email... [SKIPPED] (Test Mode)")
     else:
         logging.info("10. Sending PEF Briefing to Telegram...")
-        if os.getenv("TELEGRAM_PEF_CHANNEL_ID"):
+        if pef_telegram_configured:
             pef_delivery_complete = False
             if briefing_generation_succeeded(briefing_pef):
                 pef_sent = send_telegram_message(briefing_pef, target="pef")
@@ -4161,6 +4728,7 @@ def main():
                 pef_delivery_complete = (
                     pef_sent and pef_links_sent and watchlist_links_sent
                 )
+                pef_telegram_delivery_complete = pef_delivery_complete
             else:
                 logging.error("   Skipping PEF Telegram send because briefing generation failed.")
 
@@ -4182,7 +4750,7 @@ def main():
                     "remain uncommitted."
                 )
 
-        if email_target_enabled("pef"):
+        if pef_email_configured:
             if briefing_generation_succeeded(briefing_pef):
                 pef_email_content = briefing_pef
                 if pef_links_message:
@@ -4194,11 +4762,12 @@ def main():
                         f"{pef_email_content.rstrip()}\n\n---\n\n{watchlist_links_message}"
                     )
                 logging.info("   Sending PEF Briefing by Email...")
-                if not send_email_message(
+                pef_email_delivery_complete = send_email_message(
                     pef_email_content,
                     target="pef",
                     briefing_date=today,
-                ):
+                )
+                if not pef_email_delivery_complete:
                     logging.warning(
                         "   [Email] PEF briefing email delivery was not completed."
                     )
@@ -4206,6 +4775,21 @@ def main():
                 logging.error(
                     "   Skipping PEF email send because briefing generation failed."
                 )
+
+        bond_delivery_configured = (
+            pef_telegram_configured or pef_email_configured
+        )
+        bond_delivery_complete = (
+            briefing_generation_succeeded(briefing_pef)
+            and bond_delivery_configured
+            and pef_telegram_delivery_complete
+            and pef_email_delivery_complete
+        )
+        commit_bond_history_after_delivery(
+            bond_schedule_digest,
+            delivery_configured=bond_delivery_configured,
+            delivery_complete=bond_delivery_complete,
+        )
 
     if save_history_after_run:
         flush_pending_news_history(news_history, pending_to_commit)

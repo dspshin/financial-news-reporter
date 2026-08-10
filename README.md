@@ -110,7 +110,14 @@ BOND_DART_LOOKAHEAD_DAYS=14
 BOND_DART_MAX_CANDIDATES=16
 BOND_DART_MAX_UPCOMING=5
 BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY=8
-BOND_NH_MAX_DETAILS=4
+BOND_NH_MAX_DETAILS=10
+# 금투협 발행액 미확정 상태에서도 표시할 비금융 회사채 발행사(쉼표 구분)
+BOND_KOFIA_PENDING_COMPANY_ALLOWLIST=
+# 변경 없는 NH 예정물은 축약하고 신규·변경·당일 일정만 상세 표시
+BOND_HISTORY_ENABLED=true
+BOND_HISTORY_FILE=.bond_history.json
+# 정상 수집에서 예정물이 연속으로 사라졌을 때 재확인 알림을 내는 횟수
+BOND_HISTORY_MISSING_CONFIRMATIONS=2
 NH_PDF_TIMEOUT_SECONDS=90
 NH_PDF_LOOKBACK_DAYS=3
 NH_PDF_PLANNED_LOOKAHEAD_DAYS=45
@@ -138,6 +145,8 @@ python main.py
 운영 cron을 월~금에만 실행해도 됩니다. 월요일은 `weekday` 모드를 유지하면서 최근 3일의 주말 뉴스와 이번 주 일정 쿼리를 자동으로 추가하고, 토·일요일 모드는 수동 실행용으로 남아 있습니다.
 
 PEF 관심 기업은 `pef_watchlist.json`에서 관리합니다. 기본값은 `모토닉`, `페퍼저축은행`이며 `aliases`에 기사에서 사용할 수 있는 다른 표기를 추가할 수 있습니다. 월요일에는 관심 기업 뉴스도 최근 3일을 확인하고, 한 번 전송 완료된 기사는 기존 PEF 뉴스 히스토리 기준으로 다시 보내지 않습니다.
+
+채권 일정 히스토리를 처음 활성화한 날에는 45일 이내 NH 대표주관 일정을 `기준 일정`으로 모두 표시합니다. 이후에는 신규·변경·당일 일정만 상세 표시하고, 변경 없는 종목은 한 줄로 축약합니다. 현재 NH 자료가 stale이거나 수집에 실패하면 `.bond_history.json`을 갱신하지 않으며, 설정된 PEF 전송 채널이 모두 성공한 경우에만 새 스냅샷을 저장합니다.
 
 ### 수동 모드 테스트 (Manual Mode)
 특정 요일의 로직을 강제로 테스트하려면 `--mode` 옵션을 사용하세요.

@@ -103,6 +103,31 @@ class HistoryTransactionTests(unittest.TestCase):
         self.assertEqual(committed, 1)
         self.assertEqual(len(history["articles"]), 1)
 
+    def test_bond_history_commits_only_after_complete_delivery(self):
+        pending_history = main.build_bond_history_state(
+            events={"issuer|regular": {"event": {"issuer": "발행사"}}},
+            path="/tmp/bond-history-test.json",
+            initialized=True,
+        )
+        digest = {"next_history": pending_history}
+        saver = Mock(return_value=True)
+
+        self.assertFalse(main.commit_bond_history_after_delivery(
+            digest,
+            delivery_configured=True,
+            delivery_complete=False,
+            saver=saver,
+        ))
+        saver.assert_not_called()
+
+        self.assertTrue(main.commit_bond_history_after_delivery(
+            digest,
+            delivery_configured=True,
+            delivery_complete=True,
+            saver=saver,
+        ))
+        saver.assert_called_once_with(pending_history)
+
     @patch.dict(
         "os.environ",
         {
@@ -617,6 +642,50 @@ class PefBriefingFormatTests(unittest.TestCase):
 
 
 class BondMarketTests(unittest.TestCase):
+    @staticmethod
+    def _schedule_event(
+        issuer,
+        demand_date,
+        payment_date,
+        amount_eok=500,
+        max_amount_eok=1000,
+    ):
+        return {
+            "source": "nh_pdf",
+            "issuer": issuer,
+            "rating": "A0",
+            "term": "2년",
+            "amount_eok": amount_eok,
+            "max_amount_eok": max_amount_eok,
+            "demand_date": demand_date,
+            "payment_date": payment_date,
+            "managers": ["NH", "KB"],
+            "tranches": [{"term": "2", "amount_eok": amount_eok}],
+            "rate_band": "개별 -30~+30bp",
+            "report_url": "https://example.com/nh.pdf",
+        }
+
+    @staticmethod
+    def _bond_market_data(reference_date, events, nh_status="ok", source_date=None):
+        return {
+            "enabled": True,
+            "reference_date": reference_date,
+            "dart": {"status": "empty", "items": []},
+            "kofia": {
+                "status": "empty",
+                "items": [],
+                "pending_items": [],
+                "categories": {},
+                "pending_categories": {},
+            },
+            "nh": {
+                "status": nh_status,
+                "source_date": source_date or reference_date,
+                "items": events,
+                "pdf_url": "https://example.com/nh.pdf",
+            },
+        }
+
     def test_parses_dart_toc_and_bond_event(self):
         report_html = """
         <script>
@@ -689,6 +758,8 @@ class BondMarketTests(unittest.TestCase):
         <val6>376.2</val6><val9>-</val9></BISComDspDatDTO>
         <BISComDspDatDTO><val1>한국철도공사284</val1><val3>20260723</val3>
         <val6>0</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>한국투자증권34</val1><val3>20260723</val3>
+        <val6>0</val6><val9>-</val9></BISComDspDatDTO>
         <BISComDspDatDTO><val1>졸스37</val1><val3>20260723</val3>
         <val6>0</val6><val9>-</val9></BISComDspDatDTO>
         </message></root>""".encode("utf-8")
@@ -710,7 +781,29 @@ class BondMarketTests(unittest.TestCase):
         self.assertEqual(excluded_counts["mezzanine"], 1)
         self.assertEqual(
             [record["issuer"] for record in pending_records],
-            ["한국철도공사"],
+            ["한국철도공사", "한국투자증권"],
+        )
+
+    @patch.dict(
+        "os.environ",
+        {"BOND_KOFIA_PENDING_COMPANY_ALLOWLIST": "코웨이"},
+        clear=False,
+    )
+    def test_kofia_pending_company_allowlist_keeps_named_issuer(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <root><message><proframeHeader><pfmResponseDtal/></proframeHeader>
+        <BISComDspDatDTO><val1>코웨이15</val1><val3>20260729</val3>
+        <val6>0</val6></BISComDspDatDTO>
+        </message></root>""".encode("utf-8")
+
+        _records, pending_records = main.parse_kofia_issuance_response(
+            xml,
+            include_pending=True,
+        )
+
+        self.assertEqual(
+            [record["issuer"] for record in pending_records],
+            ["코웨이"],
         )
 
     def test_kofia_normalizes_tranches_and_policy_banks(self):
@@ -747,6 +840,9 @@ class BondMarketTests(unittest.TestCase):
 메리츠금융지주  AA0  2  800  1,500  2,800  NH/KB/한투/신한  개별 -30~+30  7/29(수)  8/6(목)
                           3  700
 교보생명보험(신종)  AA0  30NC5  금액 미정  4,000  NH/신한/한투  고정  미정  8/31(월)
+  우리금융에프앤아이                  A0        1.5                                         2,500       NH/삼성/신한/키움                                                   개별   -30~+30      9/1(화)     9/9(수)         /
+                                        2        1,500                                                                                                       개별   -30~+30                                /
+                                        3                                                                                                                    개별   -30~+30                                /
 """
         events = main.parse_nh_syndication_text(
             pdf_text,
@@ -754,8 +850,8 @@ class BondMarketTests(unittest.TestCase):
             pdf_url="https://example.com/nh.pdf",
         )
 
-        self.assertEqual(len(events), 3)
-        hana, meritz, kyobo = events
+        self.assertEqual(len(events), 4)
+        hana, meritz, kyobo, woori = events
         self.assertEqual(hana["issuer"], "하나에프앤아이")
         self.assertEqual(hana["term"], "1.5/2/3년")
         self.assertEqual(hana["amount_eok"], 1500)
@@ -779,6 +875,46 @@ class BondMarketTests(unittest.TestCase):
         self.assertIsNone(kyobo["demand_date"])
         self.assertEqual(kyobo["payment_date"], date(2026, 8, 31))
         self.assertEqual(kyobo["rate_band"], "고정")
+        self.assertEqual(woori["term"], "1.5/2/3년")
+        self.assertEqual(woori["amount_eok"], 1500)
+        self.assertEqual(woori["max_amount_eok"], 2500)
+        self.assertEqual(
+            main.format_tranche_amounts(woori),
+            "1.5/2/3년 1,500억원 (최대 2,500억원)",
+        )
+
+    @patch.dict(
+        "os.environ",
+        {"NH_PDF_PLANNED_LOOKAHEAD_DAYS": "45"},
+        clear=False,
+    )
+    @patch("main.extract_nh_syndication_pdf")
+    def test_nh_schedule_uses_planned_range_for_dated_events(self, extract_pdf):
+        extract_pdf.return_value = (
+            """
+롯데건설  A0  1  500  1,000  NH/KB  개별 -30~+30  8/19(수)  8/26(수)
+삼양패키징  A-  2  600  1,000  NH/KB  개별 -30~+30  8/28(금)  9/4(금)
+우리금융에프앤아이  A0  2  1,500  2,500  NH/삼성  개별 -30~+30  9/1(화)  9/9(수)
+코웨이  AA-  2  2,000  4,000  NH/KB  개별 -30~+30  9/2(수)  9/10(목)
+범위밖회사  A0  2  500  1,000  NH/KB  개별 -30~+30  9/25(금)  10/2(금)
+""",
+            None,
+        )
+        response = Mock(status_code=200, content=b"%PDF-fake")
+        response.raise_for_status.return_value = None
+        requester = Mock()
+        requester.get.return_value = response
+
+        result = main.fetch_nh_syndication_schedule(
+            date(2026, 8, 10),
+            requester=requester,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            [event["issuer"] for event in result["items"]],
+            ["롯데건설", "삼양패키징", "우리금융에프앤아이", "코웨이"],
+        )
 
     def test_dart_event_wins_over_matching_nh_schedule(self):
         dart_event = {
@@ -864,6 +1000,291 @@ class BondMarketTests(unittest.TestCase):
         self.assertIn("밴드: 개별 -30~+30bp", section)
         self.assertNotIn("GP 체크", section)
         self.assertNotIn("확인 발행액", section)
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_section_default_detail_limit_includes_more_than_four_events(self):
+        events = [
+            {
+                "source": "nh_pdf",
+                "issuer": f"예정회사{index}",
+                "rating": "A0",
+                "term": "2년",
+                "amount_eok": 500,
+                "max_amount_eok": 1000,
+                "demand_date": date(2026, 8, 10 + index),
+                "payment_date": date(2026, 8, 17 + index),
+                "managers": ["NH"],
+                "tranches": [{"term": "2", "amount_eok": 500}],
+                "rate_band": "개별 -30~+30bp",
+                "report_url": "https://example.com/nh.pdf",
+            }
+            for index in range(1, 7)
+        ]
+        section = main.build_bond_market_section({
+            "enabled": True,
+            "reference_date": date(2026, 8, 10),
+            "dart": {"status": "empty", "items": []},
+            "kofia": {
+                "status": "empty",
+                "items": [],
+                "pending_items": [],
+                "categories": {},
+                "pending_categories": {},
+            },
+            "nh": {
+                "status": "ok",
+                "source_date": date(2026, 8, 10),
+                "items": events,
+                "pdf_url": "https://example.com/nh.pdf",
+            },
+        })
+
+        self.assertIn("예정회사1", section)
+        self.assertIn("예정회사6", section)
+
+    def test_bond_history_baseline_then_compacts_unchanged_schedules(self):
+        day_one = date(2026, 8, 10)
+        events = [
+            self._schedule_event(
+                "롯데건설",
+                date(2026, 8, 19),
+                date(2026, 8, 26),
+            ),
+            self._schedule_event(
+                "삼양패키징",
+                date(2026, 8, 28),
+                date(2026, 9, 4),
+            ),
+        ]
+        history = main.build_bond_history_state(
+            path="/tmp/bond-history-test.json"
+        )
+        first_data = self._bond_market_data(day_one, events)
+        first_digest = main.prepare_bond_schedule_digest(
+            first_data,
+            history,
+            day_one,
+        )
+        first_section = main.build_bond_market_section(
+            first_data,
+            day_one,
+            schedule_digest=first_digest,
+        )
+
+        self.assertTrue(first_digest["baseline"])
+        self.assertEqual(len(first_digest["baseline_events"]), 2)
+        self.assertIn("[ 기준 예정 일정 ]", first_section)
+        self.assertIn("[기준]", first_section)
+
+        day_two = date(2026, 8, 11)
+        second_data = self._bond_market_data(day_two, events)
+        second_digest = main.prepare_bond_schedule_digest(
+            second_data,
+            first_digest["next_history"],
+            day_two,
+        )
+        second_section = main.build_bond_market_section(
+            second_data,
+            day_two,
+            schedule_digest=second_digest,
+        )
+
+        self.assertFalse(second_digest["baseline"])
+        self.assertEqual(len(second_digest["unchanged_events"]), 2)
+        self.assertEqual(second_digest["new_events"], [])
+        self.assertIn("[ 기존 일정 유지 ]", second_section)
+        self.assertIn("2건: 롯데건설, 삼양패키징", second_section)
+        self.assertNotIn("■ [기준]", second_section)
+
+    def test_bond_history_shows_changed_new_and_due_today_schedules(self):
+        day_one = date(2026, 8, 10)
+        initial_events = [
+            self._schedule_event(
+                "변경회사",
+                date(2026, 8, 12),
+                date(2026, 8, 20),
+            ),
+            self._schedule_event(
+                "당일회사",
+                date(2026, 8, 11),
+                date(2026, 8, 18),
+            ),
+        ]
+        first_digest = main.prepare_bond_schedule_digest(
+            self._bond_market_data(day_one, initial_events),
+            main.build_bond_history_state(path="/tmp/bond-history-test.json"),
+            day_one,
+        )
+
+        day_two = date(2026, 8, 11)
+        current_events = [
+            self._schedule_event(
+                "변경회사",
+                date(2026, 8, 11),
+                date(2026, 8, 20),
+                amount_eok=800,
+                max_amount_eok=1200,
+            ),
+            initial_events[1],
+            self._schedule_event(
+                "신규회사",
+                date(2026, 8, 25),
+                date(2026, 9, 1),
+            ),
+        ]
+        second_data = self._bond_market_data(day_two, current_events)
+        second_digest = main.prepare_bond_schedule_digest(
+            second_data,
+            first_digest["next_history"],
+            day_two,
+        )
+        section = main.build_bond_market_section(
+            second_data,
+            day_two,
+            schedule_digest=second_digest,
+        )
+
+        self.assertEqual(len(second_digest["changed_events"]), 1)
+        self.assertEqual(len(second_digest["new_events"]), 1)
+        self.assertEqual(len(second_digest["today_events"]), 1)
+        self.assertIn("[변경]", section)
+        self.assertIn("수요예측 08/12 → 08/11", section)
+        self.assertIn("발행액 500억원 → 800억원", section)
+        self.assertIn("[신규]", section)
+        self.assertIn("[당일]", section)
+
+    @patch.dict(
+        "os.environ",
+        {"BOND_HISTORY_MISSING_CONFIRMATIONS": "2"},
+        clear=False,
+    )
+    def test_bond_history_alerts_only_after_two_successful_absences(self):
+        day_one = date(2026, 8, 10)
+        event = self._schedule_event(
+            "미확인회사",
+            date(2026, 8, 20),
+            date(2026, 8, 27),
+        )
+        first_digest = main.prepare_bond_schedule_digest(
+            self._bond_market_data(day_one, [event]),
+            main.build_bond_history_state(path="/tmp/bond-history-test.json"),
+            day_one,
+        )
+
+        day_two = date(2026, 8, 11)
+        second_digest = main.prepare_bond_schedule_digest(
+            self._bond_market_data(day_two, [], nh_status="empty"),
+            first_digest["next_history"],
+            day_two,
+        )
+        self.assertEqual(second_digest["missing_alerts"], [])
+
+        day_three = date(2026, 8, 12)
+        third_data = self._bond_market_data(day_three, [], nh_status="empty")
+        third_digest = main.prepare_bond_schedule_digest(
+            third_data,
+            second_digest["next_history"],
+            day_three,
+        )
+        third_section = main.build_bond_market_section(
+            third_data,
+            day_three,
+            schedule_digest=third_digest,
+        )
+
+        self.assertEqual(len(third_digest["missing_alerts"]), 1)
+        self.assertIn("[ 일정 재확인 필요 ]", third_section)
+        self.assertIn("미확인회사: NH 예정표에서 2회 연속 미확인", third_section)
+
+    def test_bond_history_does_not_advance_on_stale_snapshot(self):
+        day_one = date(2026, 8, 10)
+        event = self._schedule_event(
+            "보존회사",
+            date(2026, 8, 20),
+            date(2026, 8, 27),
+        )
+        first_digest = main.prepare_bond_schedule_digest(
+            self._bond_market_data(day_one, [event]),
+            main.build_bond_history_state(path="/tmp/bond-history-test.json"),
+            day_one,
+        )
+        stale_data = self._bond_market_data(
+            date(2026, 8, 11),
+            [],
+            nh_status="stale",
+            source_date=day_one,
+        )
+
+        stale_digest = main.prepare_bond_schedule_digest(
+            stale_data,
+            first_digest["next_history"],
+            date(2026, 8, 11),
+        )
+
+        self.assertFalse(stale_digest["reliable"])
+        self.assertIsNone(stale_digest["next_history"])
+
+    def test_bond_history_ignores_temporary_dart_enrichment_loss(self):
+        day_one = date(2026, 8, 10)
+        nh_event = self._schedule_event(
+            "안정회사",
+            date(2026, 8, 20),
+            date(2026, 8, 27),
+        )
+        dart_event = {
+            **nh_event,
+            "source": "dart",
+            "security_type": "무보증사채",
+            "start_time": "09:00",
+            "end_time": "16:00",
+            "amount_eok": 600,
+            "report_url": "https://dart.example/report",
+        }
+        first_data = self._bond_market_data(day_one, [nh_event])
+        first_data["dart"] = {"status": "ok", "items": [dart_event]}
+        first_digest = main.prepare_bond_schedule_digest(
+            first_data,
+            main.build_bond_history_state(path="/tmp/bond-history-test.json"),
+            day_one,
+        )
+
+        day_two = date(2026, 8, 11)
+        second_data = self._bond_market_data(day_two, [nh_event])
+        second_data["dart"] = {"status": "error", "items": []}
+        second_digest = main.prepare_bond_schedule_digest(
+            second_data,
+            first_digest["next_history"],
+            day_two,
+        )
+
+        self.assertEqual(len(second_digest["unchanged_events"]), 1)
+        self.assertEqual(second_digest["changed_events"], [])
+
+    def test_bond_history_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            history_path = Path(temp_dir) / "bond-history.json"
+            history = main.build_bond_history_state(
+                events={
+                    "issuer|regular": {
+                        "event": {"issuer": "발행사"},
+                        "fingerprint": "fingerprint",
+                        "missing_count": 0,
+                    }
+                },
+                path=str(history_path),
+                initialized=True,
+            )
+
+            self.assertTrue(main.save_bond_history(history))
+            with patch.dict(
+                "os.environ",
+                {"BOND_HISTORY_FILE": str(history_path)},
+                clear=False,
+            ):
+                loaded = main.load_bond_history()
+
+            self.assertTrue(loaded["initialized"])
+            self.assertIn("issuer|regular", loaded["events"])
 
     def test_section_distinguishes_empty_data_from_collection_error(self):
         section = main.build_bond_market_section(
