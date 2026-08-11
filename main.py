@@ -2,6 +2,8 @@ import os
 import sys
 import smtplib
 import ssl
+import base64
+import binascii
 from io import BytesIO
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
@@ -19,7 +21,7 @@ from bs4 import BeautifulSoup
 import time
 import logging
 import xml.etree.ElementTree as ET
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 
@@ -61,10 +63,52 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 }
 
+GOOGLE_NEWS_HOST = "news.google.com"
+GOOGLE_NEWS_BATCH_URL = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+_GOOGLE_NEWS_SESSION = requests.Session()
+_GOOGLE_NEWS_SESSION.headers.update({
+    **HEADERS,
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://news.google.com/",
+})
+ARTICLE_BODY_SELECTORS = (
+    '[itemprop="articleBody"]',
+    "article",
+    "#articleBody",
+    "#article-body",
+    "#article-view-content-div",
+    "#dic_area",
+    ".article-body",
+    ".article_body",
+    ".articleBody",
+    ".article-content",
+    ".article_content",
+    ".article-view",
+    ".article_view",
+    ".news-body",
+    ".news_body",
+    ".newsct_article",
+    ".view-content",
+    ".view_con",
+)
+ARTICLE_EXCLUDED_CONTAINER_KEYWORDS = (
+    "advert", "banner", "byline", "comment", "copyright", "footer", "header",
+    "navigation", "recommend", "related", "reporter", "share", "sidebar",
+    "subscribe",
+)
+ARTICLE_BOILERPLATE_PHRASES = (
+    "all rights reserved", "copyright", "무단 전재", "무단전재", "재배포 금지",
+    "개인정보처리방침", "사업자등록번호",
+)
+_GOOGLE_NEWS_URL_CACHE = {}
+_LAST_GOOGLE_NEWS_RESOLVE_AT = 0.0
+_GOOGLE_NEWS_RATE_LIMIT_UNTIL = 0.0
+
 PEF_HARD_EXCLUDE_KEYWORDS = [
     "태풍", "강풍", "폭우", "산불", "지진", "홍수", "한파", "폭염",
     "연예", "가수", "배우", "콘서트", "축제", "경기 결과", "야구", "축구",
-    "농구", "배구", "epl", "kbo", "nba", "mlb"
+    "농구", "배구", "epl", "kbo", "nba", "mlb", "전문가 과정", "과정 개설",
+    "교육과정", "자격증 과정", "m&a지도사",
 ]
 
 PEF_SOFT_EXCLUDE_KEYWORDS = [
@@ -77,7 +121,9 @@ PEF_STRONG_SIGNAL_KEYWORDS = [
     "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "spin-off",
     "ipo", "상장", "엑시트", "회수", "리파이낸싱", "인수금융", "대주단",
     "드라이파우더", "private credit", "사모대출", "밸류업", "구조조정",
-    "turnaround", "운영효율화", "pef", "지분 매각", "경영권 매각"
+    "turnaround", "운영효율화", "pef", "지분 매각", "경영권 매각",
+    "공개매수", "주식매매계약", "spa", "품는다", "모펀드", "출자사업",
+    "매칭 출자", "gp 선정", "gp 선발",
 ]
 
 PEF_MEDIUM_SIGNAL_KEYWORDS = [
@@ -90,12 +136,14 @@ PEF_CATEGORY_KEYWORDS = {
     "deal_sourcing": [
         "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
         "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "분할 매각",
-        "지분", "지분 매각", "구주", "매물", "경영권 매각", "바이아웃", "소수지분"
+        "지분", "지분 매각", "구주", "매물", "경영권 매각", "바이아웃", "소수지분",
+        "공개매수", "주식매매계약", "spa", "품는다",
     ],
     "financing_exit": [
         "인수금융", "리파이낸싱", "대주단", "회사채", "차환", "유동성",
         "private credit", "사모대출", "상장", "ipo", "엑시트", "회수",
-        "유상증자", "메자닌"
+        "유상증자", "메자닌", "모펀드", "출자사업", "매칭 출자", "gp 선정",
+        "gp 선발",
     ],
     "portfolio_ops": [
         "밸류업", "구조조정", "턴어라운드", "turnaround", "운영효율화",
@@ -143,7 +191,8 @@ PEF_SPECIALIST_DEAL_KEYWORDS = (
     "mbo", "경영진 인수", "인수전", "매각전", "원매자", "숏리스트",
     "쇼트리스트", "적격인수후보", "인수 후보", "2파전", "3파전", "4파전",
     "유효경쟁", "백기사", "딜 클로징", "딜클로징", "밸류업", "볼트온",
-    "bolt-on", "애드온", "add-on", "포트폴리오사", "매각 주관",
+    "bolt-on", "애드온", "add-on", "포트폴리오사", "매각 주관", "품으로",
+    "몸값", "새 주인", "새주인", "주인 찾기", "딜 향방", "품는다",
 )
 
 PEF_BODY_ACCESS_FAILURE_KEYWORDS = (
@@ -194,6 +243,10 @@ KOFIA_STRUCTURED_BOND_KEYWORDS = (
 KOFIA_MEZZANINE_BOND_KEYWORDS = (
     "전환사채", "교환사채", "신주인수권부사채",
 )
+KOFIA_NON_TARGET_BOND_KEYWORDS = (
+    "통화안정증권", "통안증권", "통안채", "국고채권", "국고채",
+    "재정증권", "국민주택채권", "외국환평형기금채권",
+)
 KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS = (
     "유동화전문", "제일차", "제이차", "제삼차", "제사차", "제오차",
     "제육차", "제칠차", "제팔차", "제구차", "제십차",
@@ -208,13 +261,15 @@ KOFIA_ROUTINE_POLICY_BANK_ISSUERS = {
 
 PEF_DIRECT_KEYWORDS = [
     "pef", "private equity", "사모펀드", "사모투자", "바이아웃",
-    "블라인드펀드", "프로젝트펀드", "펀드레이징", "gp 모집",
+    "블라인드펀드", "프로젝트펀드", "펀드레이징", "gp 모집", "gp 선정",
+    "gp 선발", "모펀드", "출자사업", "매칭 출자",
 ]
 
 PEF_TITLE_DEAL_KEYWORDS = [
     "m&a", "인수", "매각", "인수합병", "우선협상", "우협", "본입찰",
     "예비입찰", "실사", "경영권", "카브아웃", "carve-out", "인수금융",
     "리파이낸싱", "엑시트", "회수", "사모대출", "private credit",
+    "공개매수", "주식매매계약", "spa", "품는다",
 ]
 
 PEF_PUBLIC_MARKET_NOISE_KEYWORDS = [
@@ -232,7 +287,7 @@ EVENT_ACTION_ROOTS = (
     "회수", "엑시트", "소송", "제재", "승인", "선정", "모집", "통합",
     "인수금융", "리파이낸싱", "증자", "전환", "본입찰", "예비입찰",
     "우선협상", "인수전", "매각전", "mbo", "2파전", "3파전", "4파전",
-    "유효경쟁", "백기사", "밸류업",
+    "유효경쟁", "백기사", "밸류업", "공개매수", "주식매매계약", "spa",
 )
 
 KOREAN_PARTICLE_SUFFIXES = (
@@ -304,6 +359,21 @@ def get_pef_content_access_issue(content):
 
 def is_pef_specialist_query(query):
     return query in PEF_SPECIALIST_NEWS_QUERIES
+
+
+def get_pef_headline_candidate_hits(title, specialist_query=False):
+    headline = normalize_text((title or "").rsplit(" - ", 1)[0])
+    direct_hits = sorted({kw for kw in PEF_DIRECT_KEYWORDS if kw in headline})
+    deal_hits = sorted({kw for kw in PEF_TITLE_DEAL_KEYWORDS if kw in headline})
+    specialist_hits = sorted({
+        kw for kw in PEF_SPECIALIST_DEAL_KEYWORDS if kw in headline
+    }) if specialist_query else []
+    return {
+        "accepted": bool(direct_hits or deal_hits or specialist_hits),
+        "direct_hits": direct_hits,
+        "deal_hits": deal_hits,
+        "specialist_hits": specialist_hits,
+    }
 
 
 def evaluate_pef_article(title, link, content, specialist_query=False):
@@ -379,8 +449,8 @@ def evaluate_pef_article(title, link, content, specialist_query=False):
     )
     has_specialist_context = bool(
         specialist_query
+        and specialist_title_hits
         and specialist_body_hits
-        and (specialist_title_hits or specialist_body_hits)
     )
 
     if trusted_source:
@@ -557,6 +627,13 @@ def load_pef_watchlist(path=None):
 def parse_int_env(name, default):
     try:
         return int(os.getenv(name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_float_env(name, default):
+    try:
+        return float(os.getenv(name, default))
     except (TypeError, ValueError):
         return default
 
@@ -818,8 +895,63 @@ def new_fetch_status(source):
         "queries_succeeded": 0,
         "queries_failed": 0,
         "entries_found": 0,
+        "content_attempted": 0,
+        "content_usable": 0,
+        "content_failed": 0,
+        "content_failure_reasons": {},
+        "content_outage": False,
+        "content_outage_sources": [],
         "errors": [],
     }
+
+
+def is_content_fetch_outage(status):
+    if not status:
+        return False
+    if status.get("content_outage"):
+        return True
+
+    attempted = status.get("content_attempted", 0)
+    usable = status.get("content_usable", 0)
+    if attempted <= 0 or usable > 0:
+        return False
+
+    reasons = status.get("content_failure_reasons", {})
+    technical_failures = sum(
+        reasons.get(reason, 0)
+        for reason in (
+            "google_news_unresolved",
+            "google_news_rate_limited",
+            "request_failed",
+            "empty_content",
+        )
+    )
+    return technical_failures == attempted
+
+
+def record_content_fetch_result(status, scrape_result):
+    status["content_attempted"] += 1
+    content = scrape_result.get("content")
+    content_issue = get_pef_content_access_issue(content)
+    if content_issue is None:
+        status["content_usable"] += 1
+        return
+
+    status["content_failed"] += 1
+    scrape_status = scrape_result.get("status") or "unknown"
+    if scrape_status == "ok":
+        reason = content_issue.split(":", 1)[0]
+    else:
+        reason = scrape_status
+    reason_counts = status["content_failure_reasons"]
+    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
+
+def finalize_fetch_status(status):
+    status["content_outage"] = is_content_fetch_outage(status)
+    if status["content_outage"] and status.get("source"):
+        status["content_outage_sources"] = [status["source"]]
+    return status
 
 
 def merge_fetch_statuses(*statuses):
@@ -828,9 +960,19 @@ def merge_fetch_statuses(*statuses):
         if not status:
             continue
         for key in (
-            "queries_attempted", "queries_succeeded", "queries_failed", "entries_found"
+            "queries_attempted", "queries_succeeded", "queries_failed", "entries_found",
+            "content_attempted", "content_usable", "content_failed",
         ):
             merged[key] += status.get(key, 0)
+        for reason, count in status.get("content_failure_reasons", {}).items():
+            merged["content_failure_reasons"][reason] = (
+                merged["content_failure_reasons"].get(reason, 0) + count
+            )
+        if status.get("content_outage"):
+            merged["content_outage"] = True
+            merged["content_outage_sources"].extend(
+                status.get("content_outage_sources") or [status.get("source", "unknown")]
+            )
         merged["errors"].extend(status.get("errors", []))
     return merged
 
@@ -852,11 +994,18 @@ def is_partial_fetch_failure(status):
 
 
 def log_fetch_status(status, label):
-    logging.info(
+    message = (
         f"   [News Fetch] {label}: success={status.get('queries_succeeded', 0)}/"
         f"{status.get('queries_attempted', 0)}, failed={status.get('queries_failed', 0)}, "
         f"entries={status.get('entries_found', 0)}"
     )
+    if status.get("content_attempted", 0):
+        message += (
+            f", body_usable={status.get('content_usable', 0)}/"
+            f"{status.get('content_attempted', 0)}, "
+            f"body_failures={status.get('content_failure_reasons', {})}"
+        )
+    logging.info(message)
 
 
 def history_scope(target):
@@ -2055,6 +2204,8 @@ def get_bond_exclusion_reason(name, amount_eok):
     lowered_name = (name or "").lower()
     if not name:
         return "invalid"
+    if any(keyword in name for keyword in KOFIA_NON_TARGET_BOND_KEYWORDS):
+        return "non_target"
     if any(keyword in lowered_name for keyword in KOFIA_STRUCTURED_BOND_KEYWORDS):
         return "structured"
     if "사모" in name:
@@ -2071,6 +2222,8 @@ def is_plain_public_bond(name, amount_eok):
 
 
 def classify_kofia_bond(name):
+    if name.startswith("토지주택채권"):
+        return "공사채"
     if any(
         keyword in name
         for keyword in (
@@ -2092,6 +2245,7 @@ def classify_kofia_bond(name):
 
 def normalize_kofia_issuer(name):
     special_issuers = {
+        "토지주택채권": "한국토지주택공사",
         "산업금융채권": "산업은행",
         "중소기업금융채권": "기업은행",
         "중소기업은행": "기업은행",
@@ -2165,6 +2319,7 @@ def parse_kofia_issuance_response(
     records = []
     pending_records = []
     excluded_counts = {
+        "non_target": 0,
         "structured": 0,
         "private": 0,
         "mezzanine": 0,
@@ -2264,6 +2419,7 @@ def fetch_kofia_bond_issuance(reference_date=None, requester=None):
         "pending_categories": {category: [] for category in BOND_CATEGORY_ORDER},
         "total_amount_eok": 0.0,
         "excluded_counts": {
+            "non_target": 0,
             "structured": 0,
             "private": 0,
             "mezzanine": 0,
@@ -3309,37 +3465,376 @@ def fetch_market_data(mode="weekday"):
             
     return data
 
-def scrape_article_content(url):
-    """
-    Fetches and extracts the main text content from a news article URL.
-    """
+class GoogleNewsResolutionError(RuntimeError):
+    pass
+
+
+def is_google_news_url(url):
     try:
-        # Google News links are often redirects, requests usually handles them but let's be safe
-        response = requests.get(url, headers=HEADERS, timeout=5)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.content, 'html.parser')
-        
-        # Remove script and style elements
-        for script in soup(["script", "style", "nav", "footer", "header"]):
-            script.decompose()
-            
-        # Get text
-        text = soup.get_text(separator='\n')
-        
-        # Break into lines and remove leading/trailing space on each
-        lines = (line.strip() for line in text.splitlines())
-        # Break multi-headlines into a line each
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        # Drop blank lines
-        text = '\n'.join(chunk for chunk in chunks if chunk)
-        
-        # Limit text length to avoid token limits (approx 800 chars per article is usually enough for summary)
-        return text[:800]
-        
-    except Exception as e:
-        logging.error(f"   Failed to scrape {url}: {e}")
+        return (urlparse(url or "").hostname or "").lower() == GOOGLE_NEWS_HOST
+    except ValueError:
+        return False
+
+
+def extract_google_news_token(url):
+    parsed = urlparse(url or "")
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if (
+        (parsed.hostname or "").lower() != GOOGLE_NEWS_HOST
+        or len(path_parts) < 2
+        or path_parts[-2] not in {"articles", "read"}
+    ):
+        raise GoogleNewsResolutionError("invalid_google_news_url")
+    return path_parts[-1]
+
+
+def decode_legacy_google_news_token(token):
+    try:
+        padding = "=" * ((4 - len(token) % 4) % 4)
+        decoded = base64.urlsafe_b64decode(token + padding)
+    except (ValueError, binascii.Error):
         return None
+
+    if decoded.startswith(b"\x08\x13\x22"):
+        decoded = decoded[3:]
+    if decoded.endswith(b"\xd2\x01\x00"):
+        decoded = decoded[:-3]
+    if not decoded:
+        return None
+
+    length = 0
+    shift = 0
+    cursor = 0
+    while cursor < len(decoded) and cursor < 5:
+        current = decoded[cursor]
+        length |= (current & 0x7F) << shift
+        cursor += 1
+        if current < 0x80:
+            break
+        shift += 7
+    else:
+        return None
+
+    if length <= 0 or cursor + length > len(decoded):
+        return None
+    try:
+        candidate = decoded[cursor:cursor + length].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return candidate if candidate.startswith(("http://", "https://")) else None
+
+
+def find_google_news_decoded_url(value):
+    if isinstance(value, str):
+        if value.startswith(("http://", "https://")) and not is_google_news_url(value):
+            return value
+        try:
+            nested = json.loads(value)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return find_google_news_decoded_url(nested)
+
+    if isinstance(value, dict):
+        for nested_value in value.values():
+            candidate = find_google_news_decoded_url(nested_value)
+            if candidate:
+                return candidate
+        return None
+
+    if isinstance(value, (list, tuple)):
+        for nested_value in value:
+            candidate = find_google_news_decoded_url(nested_value)
+            if candidate:
+                return candidate
+    return None
+
+
+def parse_google_news_batch_response(response_text):
+    for line in (response_text or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith(")]}'") or line.isdigit():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        candidate = find_google_news_decoded_url(payload)
+        if candidate:
+            return candidate
+    raise GoogleNewsResolutionError("decoded_url_not_found")
+
+
+def wait_for_google_news_resolution_slot(sleeper=None, monotonic=None):
+    global _LAST_GOOGLE_NEWS_RESOLVE_AT
+
+    monotonic = monotonic or time.monotonic
+    sleeper = sleeper or time.sleep
+    now = monotonic()
+    if now < _GOOGLE_NEWS_RATE_LIMIT_UNTIL:
+        raise GoogleNewsResolutionError("google_news_rate_limited_circuit_open")
+
+    interval = max(
+        0.0,
+        parse_float_env("GOOGLE_NEWS_RESOLVE_INTERVAL_SECONDS", 2.0),
+    )
+    wait_seconds = interval - (now - _LAST_GOOGLE_NEWS_RESOLVE_AT)
+    if wait_seconds > 0:
+        sleeper(wait_seconds)
+        now = monotonic()
+    _LAST_GOOGLE_NEWS_RESOLVE_AT = now
+
+
+def raise_for_google_news_status(response):
+    global _GOOGLE_NEWS_RATE_LIMIT_UNTIL
+
+    if getattr(response, "status_code", None) == 429:
+        cooldown = max(
+            30.0,
+            parse_float_env("GOOGLE_NEWS_RATE_LIMIT_COOLDOWN_SECONDS", 120.0),
+        )
+        _GOOGLE_NEWS_RATE_LIMIT_UNTIL = time.monotonic() + cooldown
+        raise GoogleNewsResolutionError("google_news_rate_limited")
+    response.raise_for_status()
+
+
+def resolve_google_news_url(url, requester=None):
+    if not is_google_news_url(url):
+        return url
+
+    requester = requester or _GOOGLE_NEWS_SESSION
+    token = extract_google_news_token(url)
+    if token in _GOOGLE_NEWS_URL_CACHE:
+        return _GOOGLE_NEWS_URL_CACHE[token]
+
+    legacy_url = decode_legacy_google_news_token(token)
+    if legacy_url:
+        _GOOGLE_NEWS_URL_CACHE[token] = legacy_url
+        return legacy_url
+
+    wait_for_google_news_resolution_slot()
+    timeout = max(3, parse_int_env("GOOGLE_NEWS_RESOLVE_TIMEOUT_SECONDS", 10))
+    locale_params = {"hl": "ko", "gl": "KR", "ceid": "KR:ko"}
+    signature = None
+    timestamp = None
+
+    for path_prefix in ("articles", "rss/articles"):
+        response = requester.get(
+            f"https://{GOOGLE_NEWS_HOST}/{path_prefix}/{token}",
+            headers=HEADERS,
+            params=locale_params,
+            timeout=timeout,
+        )
+        raise_for_google_news_status(response)
+        final_url = getattr(response, "url", None)
+        if isinstance(final_url, str) and not is_google_news_url(final_url):
+            _GOOGLE_NEWS_URL_CACHE[token] = final_url
+            return final_url
+
+        soup = BeautifulSoup(response.content, "html.parser")
+        decoding_node = soup.select_one("[data-n-a-sg][data-n-a-ts]")
+        if decoding_node:
+            signature = decoding_node.get("data-n-a-sg")
+            timestamp = decoding_node.get("data-n-a-ts")
+            if signature and timestamp:
+                break
+
+    if not signature or not timestamp:
+        raise GoogleNewsResolutionError("decoding_parameters_not_found")
+
+    request_payload = [
+        "garturlreq",
+        [
+            [
+                "X", "X", ["X", "X"], None, None, 1, 1, "US:en", None, 1,
+                None, None, None, None, None, 0, 1,
+            ],
+            "X", "X", 1, [1, 1, 1], 1, 1, None, 0, 0, None, 0,
+        ],
+        token,
+        int(timestamp),
+        signature,
+    ]
+    rpc_payload = [[[
+        "Fbv4je",
+        json.dumps(request_payload, ensure_ascii=False, separators=(",", ":")),
+    ]]]
+    batch_headers = dict(HEADERS)
+    batch_headers["Content-Type"] = "application/x-www-form-urlencoded;charset=UTF-8"
+    batch_response = requester.post(
+        GOOGLE_NEWS_BATCH_URL,
+        headers=batch_headers,
+        data={
+            "f.req": json.dumps(
+                rpc_payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        },
+        timeout=timeout,
+    )
+    raise_for_google_news_status(batch_response)
+    decoded_url = parse_google_news_batch_response(batch_response.text)
+    _GOOGLE_NEWS_URL_CACHE[token] = decoded_url
+    return decoded_url
+
+
+def article_container_is_excluded(element):
+    for container in [element, *list(element.parents)]:
+        if getattr(container, "name", None) in {"aside", "footer", "header", "nav"}:
+            return True
+        attributes = []
+        container_id = container.get("id") if hasattr(container, "get") else None
+        container_classes = container.get("class") if hasattr(container, "get") else None
+        if container_id:
+            attributes.append(str(container_id))
+        if container_classes:
+            attributes.extend(str(item) for item in container_classes)
+        marker = " ".join(attributes).lower()
+        if any(keyword in marker for keyword in ARTICLE_EXCLUDED_CONTAINER_KEYWORDS):
+            return True
+    return False
+
+
+def is_article_boilerplate(text):
+    lowered = (text or "").lower()
+    return any(phrase in lowered for phrase in ARTICLE_BOILERPLATE_PHRASES)
+
+
+def collect_article_paragraphs(container):
+    paragraphs = []
+    seen = set()
+    for paragraph in container.find_all("p"):
+        if article_container_is_excluded(paragraph):
+            continue
+        text = re.sub(r"\s+", " ", " ".join(paragraph.stripped_strings)).strip()
+        if len(text) < 30 or is_article_boilerplate(text) or text in seen:
+            continue
+        link_text = re.sub(
+            r"\s+",
+            " ",
+            " ".join(link.get_text(" ", strip=True) for link in paragraph.find_all("a")),
+        ).strip()
+        if link_text and len(link_text) / max(len(text), 1) >= 0.8:
+            continue
+        seen.add(text)
+        paragraphs.append(text)
+    return paragraphs
+
+
+def find_json_ld_article_bodies(value):
+    bodies = []
+    if isinstance(value, dict):
+        article_body = value.get("articleBody")
+        if isinstance(article_body, str):
+            normalized = re.sub(r"\s+", " ", article_body).strip()
+            if normalized:
+                bodies.append(normalized)
+        for nested_value in value.values():
+            bodies.extend(find_json_ld_article_bodies(nested_value))
+    elif isinstance(value, list):
+        for nested_value in value:
+            bodies.extend(find_json_ld_article_bodies(nested_value))
+    return bodies
+
+
+def extract_article_body(content):
+    soup = BeautifulSoup(content, "html.parser")
+    candidates = []
+
+    for script in soup.select('script[type="application/ld+json"]'):
+        try:
+            structured_data = json.loads(script.string or script.get_text())
+        except (TypeError, json.JSONDecodeError):
+            continue
+        candidates.extend(find_json_ld_article_bodies(structured_data))
+
+    for selector in ARTICLE_BODY_SELECTORS:
+        for container in soup.select(selector):
+            paragraphs = collect_article_paragraphs(container)
+            if paragraphs:
+                candidates.append("\n".join(paragraphs))
+                continue
+            text = re.sub(r"\s+", " ", container.get_text(" ", strip=True)).strip()
+            if len(text) >= 80 and not is_article_boilerplate(text):
+                candidates.append(text)
+
+    global_paragraphs = collect_article_paragraphs(soup)
+    if global_paragraphs:
+        candidates.append("\n".join(global_paragraphs))
+
+    candidates = [candidate.strip() for candidate in candidates if candidate.strip()]
+    if not candidates:
+        return None
+    best_candidate = max(candidates, key=len)
+    max_chars = max(800, parse_int_env("ARTICLE_CONTENT_MAX_CHARS", 2000))
+    return best_candidate[:max_chars]
+
+
+def scrape_article_content(url, return_metadata=False, requester=None):
+    """Resolve a news URL and extract article text without accepting Google wrappers."""
+    article_requester = requester or requests
+    result = {
+        "content": None,
+        "original_url": url,
+        "resolved_url": None,
+        "status": "unknown",
+        "error": None,
+    }
+    try:
+        resolved_url = resolve_google_news_url(url, requester=requester)
+        if is_google_news_url(resolved_url):
+            raise GoogleNewsResolutionError("resolved_url_still_google_news")
+        result["resolved_url"] = resolved_url
+
+        timeout = max(3, parse_int_env("ARTICLE_FETCH_TIMEOUT_SECONDS", 10))
+        response = article_requester.get(resolved_url, headers=HEADERS, timeout=timeout)
+        response.raise_for_status()
+        final_url = getattr(response, "url", None)
+        if isinstance(final_url, str) and final_url:
+            result["resolved_url"] = final_url
+        if is_google_news_url(result["resolved_url"]):
+            raise GoogleNewsResolutionError("publisher_redirected_to_google_news")
+
+        content = extract_article_body(response.content)
+        result["content"] = content
+        result["status"] = "ok" if content else "empty_content"
+        logging.info(
+            f"      [Article Fetch] status={result['status']} "
+            f"host={urlparse(result['resolved_url']).hostname or 'unknown'} "
+            f"chars={len(content or '')}"
+        )
+    except GoogleNewsResolutionError as error:
+        result["status"] = (
+            "google_news_rate_limited"
+            if "rate_limited" in str(error)
+            else "google_news_unresolved"
+        )
+        result["error"] = str(error)
+        logging.warning(f"      [Article Fetch] Google News URL unresolved: {error}")
+    except Exception as error:
+        result["status"] = "request_failed"
+        result["error"] = f"{type(error).__name__}: {error}"
+        logging.warning(f"      [Article Fetch] Failed: {result['error']}")
+
+    return result if return_metadata else result["content"]
+
+
+def coerce_scrape_result(value, original_url):
+    if isinstance(value, dict):
+        result = dict(value)
+        result.setdefault("content", None)
+        result.setdefault("original_url", original_url)
+        result.setdefault("resolved_url", original_url)
+        result.setdefault("status", "ok" if result["content"] else "empty_content")
+        result.setdefault("error", None)
+        return result
+    return {
+        "content": value,
+        "original_url": original_url,
+        "resolved_url": original_url,
+        "status": "ok" if value else "empty_content",
+        "error": None,
+    }
 
 
 def parse_google_news_feed(response):
@@ -3385,6 +3880,7 @@ def fetch_news(
     accepted_event_titles = []
     context_event_titles = set()
     event_source_counts = {}
+    attempted_candidate_keys = set()
     collected_links = []
     pending_articles = []
     fetch_status = new_fetch_status(f"{target}_news")
@@ -3438,11 +3934,50 @@ def fetch_news(
                     seen_title_keys.add(title_key)
                     continue
 
+                if target == "pef":
+                    candidate_key = (
+                        title_key,
+                        extract_article_source(entry.title).strip().lower(),
+                    )
+                    if candidate_key in attempted_candidate_keys:
+                        logging.info(
+                            "   [PEF Prefilter] SKIP duplicate headline/source "
+                            f"before body fetch: {entry.title}"
+                        )
+                        seen_links.add(entry.link)
+                        continue
+                    attempted_candidate_keys.add(candidate_key)
+
                 seen_links.add(entry.link)
                 seen_title_keys.add(title_key)
                 
                 logging.info(f"   - Processing: {entry.title}")
-                content = scrape_article_content(entry.link)
+                if target == "pef":
+                    headline_candidate = get_pef_headline_candidate_hits(
+                        entry.title,
+                        specialist_query=specialist_query,
+                    )
+                    if not headline_candidate["accepted"]:
+                        logging.info(
+                            "   [PEF Prefilter] REJECT before body fetch: "
+                            "no headline PEF/deal anchor"
+                        )
+                        continue
+                original_link = entry.link
+                scrape_result = coerce_scrape_result(
+                    scrape_article_content(
+                        original_link,
+                        return_metadata=True,
+                    ),
+                    original_link,
+                )
+                content = scrape_result["content"]
+                resolved_url = scrape_result.get("resolved_url")
+                if isinstance(resolved_url, str) and resolved_url:
+                    entry.link = resolved_url
+                    seen_links.add(resolved_url)
+                if target == "pef":
+                    record_content_fetch_result(fetch_status, scrape_result)
                 
                 pef_meta = None
                 if target == "pef":
@@ -3530,6 +4065,7 @@ def fetch_news(
             fetch_status["errors"].append(f"{query}: {type(e).__name__}: {str(e)[:200]}")
             logging.error(f"   Error fetching RSS for {query}: {e}")
 
+    finalize_fetch_status(fetch_status)
     log_fetch_status(fetch_status, f"target={target}")
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
@@ -3605,7 +4141,26 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                 seen_links.add(entry.link)
                 seen_titles.add(title_key)
                 logging.info(f"   - Firm mention candidate: {entry.title}")
-                content = scrape_article_content(entry.link)
+                original_link = entry.link
+                scrape_result = coerce_scrape_result(
+                    scrape_article_content(
+                        original_link,
+                        return_metadata=True,
+                    ),
+                    original_link,
+                )
+                record_content_fetch_result(fetch_status, scrape_result)
+                content = scrape_result["content"]
+                resolved_url = scrape_result.get("resolved_url")
+                if isinstance(resolved_url, str) and resolved_url:
+                    entry.link = resolved_url
+                    seen_links.add(resolved_url)
+                content_issue = get_pef_content_access_issue(content)
+                if content_issue:
+                    logging.info(
+                        f"      [Firm Mention] REJECT: inaccessible body ({content_issue})"
+                    )
+                    continue
                 searchable_text = normalize_text(entry.title, content, entry.link)
                 is_match, match_reason = match_firm_mention(searchable_text, match_terms, firm_name)
                 if not is_match:
@@ -3645,6 +4200,7 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
             fetch_status["errors"].append(f"{query}: {type(e).__name__}: {str(e)[:200]}")
             logging.error(f"   Error fetching firm mention RSS for {query}: {e}")
 
+    finalize_fetch_status(fetch_status)
     log_fetch_status(fetch_status, "firm mentions")
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
@@ -3736,7 +4292,27 @@ def fetch_watchlist_news(
                         continue
 
                     logging.info(f"   - Watchlist candidate [{company_name}]: {entry.title}")
-                    content = scrape_article_content(entry.link)
+                    original_link = entry.link
+                    scrape_result = coerce_scrape_result(
+                        scrape_article_content(
+                            original_link,
+                            return_metadata=True,
+                        ),
+                        original_link,
+                    )
+                    record_content_fetch_result(fetch_status, scrape_result)
+                    content = scrape_result["content"]
+                    resolved_url = scrape_result.get("resolved_url")
+                    if isinstance(resolved_url, str) and resolved_url:
+                        entry.link = resolved_url
+                        seen_links.add(resolved_url)
+                    content_issue = get_pef_content_access_issue(content)
+                    if content_issue:
+                        logging.info(
+                            f"      [Watchlist] REJECT [{company_name}]: "
+                            f"inaccessible body ({content_issue})"
+                        )
+                        continue
                     searchable_text = normalize_text(entry.title, content)
                     if not watchlist_company_matches(searchable_text, aliases):
                         logging.info(
@@ -3790,6 +4366,7 @@ def fetch_watchlist_news(
                     f"   Error fetching watchlist RSS for {company_name}/{alias}: {error}"
                 )
 
+    finalize_fetch_status(fetch_status)
     log_fetch_status(fetch_status, "PEF watchlist")
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
@@ -3899,6 +4476,34 @@ def build_news_collection_failure_briefing(
 <b>🎯 대응</b>
 - RSS 연결 상태를 확인한 뒤 재실행하고, 복구 전에는 시장 데이터만 참고합니다."""
 
+
+def build_article_content_failure_briefing(
+    market_data,
+    target="general",
+    briefing_date=None,
+    kr_holiday_text="",
+):
+    reference_date = briefing_date or datetime.now().date()
+    today = reference_date.strftime("%m/%d(%a)")
+    market_snapshot = build_market_snapshot(market_data, max_items=8)
+    if target == "pef":
+        persona = get_pef_persona_config()
+        header = f"👔 {today} {persona['firm_name']} GP 브리핑"
+    else:
+        header = f"📊 {today} 시장 브리핑"
+
+    return f"""<b>{header}{kr_holiday_text}</b>
+
+<b>⚠️ 기사 본문 수집 장애</b>
+- 뉴스 후보는 검색됐지만 원문 URL 해석 또는 기사 본문 추출이 모두 실패했습니다.
+- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 불완전한 제목만으로 요약하지 않습니다.
+
+<b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
+{market_snapshot}
+
+<b>🎯 대응</b>
+- Google News 원문 URL 해석 및 언론사 본문 접근 상태를 확인한 뒤 재실행합니다."""
+
 # --- Summarizer Module ---
 def generate_briefing(
     market_data,
@@ -3941,6 +4546,17 @@ def generate_briefing(
                 "Using collection-failure briefing."
             )
             return build_news_collection_failure_briefing(
+                market_data,
+                target=target,
+                briefing_date=reference_date,
+                kr_holiday_text=kr_holiday_text,
+            )
+        if is_content_fetch_outage(fetch_status):
+            logging.warning(
+                f"   [News Fetch] Article content unavailable for target='{target}'. "
+                "Using content-failure briefing."
+            )
+            return build_article_content_failure_briefing(
                 market_data,
                 target=target,
                 briefing_date=reference_date,

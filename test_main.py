@@ -29,6 +29,36 @@ class PefFilterTests(unittest.TestCase):
         self.assertTrue(association["accepted"])
         self.assertTrue(deal["accepted"])
 
+    def test_accepts_tender_offer_spa_and_gp_commitment_headlines(self):
+        deal_body = (
+            "TPG가 롯데렌탈 지분을 인수하고 잔여 지분 공개매수와 "
+            "주식매매계약 종결 절차를 진행하는 거래입니다. "
+        ) * 10
+        tender_offer = main.evaluate_pef_article(
+            "TPG, 롯데렌탈 품는다…잔여지분 공개매수도 착수 - 매일경제",
+            "https://example.com/tender-offer",
+            deal_body,
+        )
+        spa = main.evaluate_pef_article(
+            "美 TPG, 전량 에쿼티로 롯데렌탈 산다…1.3조에 SPA 체결 - 한국경제",
+            "https://example.com/spa",
+            deal_body,
+        )
+        gp_commitment = main.evaluate_pef_article(
+            "신한벤처, 모펀드 GP 11곳에 400억 매칭 출자 - 딜사이트",
+            "https://example.com/gp-commitment",
+            "모펀드가 GP를 선정하고 운용사에 매칭 출자하는 출자사업 내용입니다. " * 10,
+        )
+
+        self.assertTrue(tender_offer["accepted"])
+        self.assertTrue(spa["accepted"])
+        self.assertTrue(gp_commitment["accepted"])
+        self.assertTrue(
+            main.get_pef_headline_candidate_hits(
+                "TPG, 롯데렌탈 품는다…잔여지분 공개매수도 착수"
+            )["accepted"]
+        )
+
     def test_rejects_generic_it_and_public_share_sale(self):
         content = "IT 시스템 통합과 데이터센터 투자에 관한 일반 산업 기사입니다. " * 12
         generic_it = main.evaluate_pef_article(
@@ -110,11 +140,153 @@ class PefFilterTests(unittest.TestCase):
             "샐러드 신제품과 할인 프로모션을 소개하는 소비자 기사입니다. " * 10,
             specialist_query=True,
         )
+        body_only_signal = main.evaluate_pef_article(
+            "트리니티항공, MRO 진출 제동…격납고 투자 또 연기 - 딜사이트",
+            "https://dealsite.co.kr/unrelated-body-signal",
+            (
+                "항공 정비 격납고 투자 일정이 연기됐다는 기사입니다. "
+                "페이지 하단에는 다른 기업의 M&A와 경영권 인수 관련 기사도 노출됩니다. "
+            ) * 8,
+            specialist_query=True,
+        )
+        training_course = main.evaluate_pef_article(
+            "한국능률협회, 제5회 M&A지도사 전문가 과정 개설 - 교육신문",
+            "https://example.com/training",
+            "M&A 실무 교육과 자격증 과정을 소개하는 모집 기사입니다. " * 10,
+            specialist_query=True,
+        )
 
         self.assertTrue(accepted["accepted"])
         self.assertFalse(unrelated["accepted"])
+        self.assertFalse(body_only_signal["accepted"])
+        self.assertFalse(training_course["accepted"])
         self.assertTrue(accepted["content_accessible"])
         self.assertTrue(any(reason.startswith("specialist_body") for reason in accepted["reasons"]))
+
+
+class GoogleNewsResolverTests(unittest.TestCase):
+    def setUp(self):
+        main._GOOGLE_NEWS_URL_CACHE.clear()
+        main._LAST_GOOGLE_NEWS_RESOLVE_AT = 0.0
+        main._GOOGLE_NEWS_RATE_LIMIT_UNTIL = 0.0
+
+    @staticmethod
+    def _response(content=b"", text="", url="https://news.google.com/"):
+        response = Mock()
+        response.content = content
+        response.text = text
+        response.url = url
+        response.raise_for_status.return_value = None
+        return response
+
+    def test_decodes_current_google_news_token_with_batch_rpc(self):
+        token = "CBMiResolverToken123"
+        google_url = f"https://news.google.com/rss/articles/{token}?oc=5"
+        parameter_html = (
+            '<c-wiz><div jscontroller="abc" data-n-a-sg="signature-123" '
+            'data-n-a-ts="1786413525"></div></c-wiz>'
+        ).encode("utf-8")
+        batch_text = (
+            ")]}'\n\n"
+            '[["wrb.fr","Fbv4je","[\\"garturlres\\",'
+            '\\"https://publisher.example.com/article/123\\"]"]]\n'
+        )
+        requester = Mock()
+        requester.get.return_value = self._response(
+            content=parameter_html,
+            url=f"https://news.google.com/articles/{token}?hl=ko",
+        )
+        requester.post.return_value = self._response(text=batch_text)
+
+        decoded = main.resolve_google_news_url(google_url, requester=requester)
+        cached = main.resolve_google_news_url(google_url, requester=requester)
+
+        self.assertEqual(decoded, "https://publisher.example.com/article/123")
+        self.assertEqual(cached, decoded)
+        self.assertEqual(requester.get.call_count, 1)
+        requester.post.assert_called_once()
+        posted_payload = requester.post.call_args.kwargs["data"]["f.req"]
+        self.assertIn(token, posted_payload)
+        self.assertIn("signature-123", posted_payload)
+
+    def test_direct_publisher_url_does_not_call_google(self):
+        requester = Mock()
+        url = "https://publisher.example.com/article/123"
+
+        self.assertEqual(main.resolve_google_news_url(url, requester=requester), url)
+        requester.get.assert_not_called()
+        requester.post.assert_not_called()
+
+    @patch("main.resolve_google_news_url")
+    def test_scraper_uses_resolved_url_and_extracts_article_paragraphs(self, resolver):
+        resolver.return_value = "https://publisher.example.com/article/123"
+        article_html = """
+        <html><body>
+          <nav><p>메뉴 메뉴 메뉴 메뉴 메뉴 메뉴 메뉴 메뉴 메뉴 메뉴</p></nav>
+          <article>
+            <p>사모펀드가 경영권 인수를 추진하며 본입찰 참여자와 거래 조건을 검토하고 있습니다.</p>
+            <p>인수금융 구조와 향후 밸류업 전략, 투자금 회수 시나리오도 함께 논의되고 있습니다.</p>
+            <p>거래 종결 전에는 실사 결과와 규제 승인 여부를 추가로 확인해야 한다는 설명입니다.</p>
+          </article>
+          <footer><p>Copyright All rights reserved. 무단 전재 및 재배포 금지</p></footer>
+        </body></html>
+        """.encode("utf-8")
+        requester = Mock()
+        requester.get.return_value = self._response(
+            content=article_html,
+            url="https://publisher.example.com/article/123",
+        )
+        google_url = "https://news.google.com/rss/articles/test-token?oc=5"
+
+        result = main.scrape_article_content(
+            google_url,
+            return_metadata=True,
+            requester=requester,
+        )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["resolved_url"], "https://publisher.example.com/article/123")
+        self.assertIn("사모펀드가 경영권 인수", result["content"])
+        self.assertNotIn("메뉴 메뉴", result["content"])
+        self.assertNotIn("Copyright", result["content"])
+
+    def test_google_wrapper_without_article_body_is_not_accepted(self):
+        content = main.extract_article_body(
+            b"<html><head><title>Google News</title></head><body></body></html>"
+        )
+        self.assertIsNone(content)
+
+    @patch.dict(
+        "os.environ",
+        {
+            "GOOGLE_NEWS_RESOLVE_INTERVAL_SECONDS": "0",
+            "GOOGLE_NEWS_RATE_LIMIT_COOLDOWN_SECONDS": "30",
+        },
+        clear=False,
+    )
+    def test_rate_limit_opens_circuit_without_hammering_google(self):
+        token = "CBMiRateLimitedToken"
+        google_url = f"https://news.google.com/rss/articles/{token}?oc=5"
+        rate_limited = self._response(
+            content=b"rate limited",
+            url="https://www.google.com/sorry/",
+        )
+        rate_limited.status_code = 429
+        requester = Mock()
+        requester.get.return_value = rate_limited
+
+        with self.assertRaisesRegex(
+            main.GoogleNewsResolutionError,
+            "google_news_rate_limited",
+        ):
+            main.resolve_google_news_url(google_url, requester=requester)
+        with self.assertRaisesRegex(
+            main.GoogleNewsResolutionError,
+            "circuit_open",
+        ):
+            main.resolve_google_news_url(google_url, requester=requester)
+
+        self.assertEqual(requester.get.call_count, 1)
 
 
 class EventDedupeTests(unittest.TestCase):
@@ -574,6 +746,13 @@ class NewsScheduleTests(unittest.TestCase):
 
 
 class PefWatchlistTests(unittest.TestCase):
+    def test_default_watchlist_includes_sewoo_global(self):
+        watchlist_path = Path(__file__).with_name("pef_watchlist.json")
+
+        watchlist = main.load_pef_watchlist(str(watchlist_path))
+
+        self.assertIn("세우글로벌", [company["name"] for company in watchlist])
+
     def test_loads_and_normalizes_watchlist_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             watchlist_path = Path(temp_dir) / "watchlist.json"
@@ -617,7 +796,10 @@ class PefWatchlistTests(unittest.TestCase):
         },
         clear=False,
     )
-    @patch("main.scrape_article_content", return_value="관심 기업 관련 기사 본문")
+    @patch(
+        "main.scrape_article_content",
+        return_value="관심 기업의 신규 사업과 재무 현황, 주요 경영 변화를 설명하는 기사 본문입니다. " * 10,
+    )
     @patch("main.parse_google_news_feed")
     @patch("main.requests.get", return_value=Mock())
     def test_collects_and_groups_news_by_watchlist_company(
@@ -697,8 +879,180 @@ class FetchStatusTests(unittest.TestCase):
         self.assertEqual(result[1], [])
         self.assertGreater(result[4]["queries_succeeded"], 1)
 
+    @patch.dict(
+        "os.environ",
+        {"PEF_SPECIALIST_NEWS_ENABLED": "false"},
+        clear=False,
+    )
+    @patch(
+        "main.scrape_article_content",
+        return_value={
+            "content": None,
+            "resolved_url": None,
+            "status": "google_news_unresolved",
+            "error": "decoding_parameters_not_found",
+        },
+    )
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_article_resolution_outage_is_not_reported_as_no_news(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        entry = SimpleNamespace(
+            title="KKR, A사 경영권 인수 본입찰 - 더벨",
+            link="https://news.google.com/rss/articles/unresolved?oc=5",
+            published="2026-08-11",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[entry])
+
+        context, links, _seen, pending, status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 11),
+        )
+        briefing = main.generate_briefing(
+            {},
+            context,
+            target="pef",
+            briefing_date=date(2026, 8, 11),
+            fetch_status=status,
+        )
+
+        self.assertEqual(context, "")
+        self.assertEqual(links, [])
+        self.assertEqual(pending, [])
+        self.assertTrue(main.is_content_fetch_outage(status))
+        self.assertIn("기사 본문 수집 장애", briefing)
+        self.assertNotIn("신규 채택 뉴스 없음", briefing)
+
+    @patch.dict(
+        "os.environ",
+        {"PEF_SPECIALIST_NEWS_ENABLED": "false"},
+        clear=False,
+    )
+    @patch("main.scrape_article_content")
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_pef_prefilter_skips_body_fetch_without_headline_anchor(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        mock_scrape,
+    ):
+        entry = SimpleNamespace(
+            title="트리니티항공, MRO 격납고 투자 일정 연기 - 딜사이트",
+            link="https://news.google.com/rss/articles/no-anchor?oc=5",
+            published="2026-08-11",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[entry])
+
+        context, links, _seen, pending, status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 11),
+        )
+
+        self.assertEqual(context, "")
+        self.assertEqual(links, [])
+        self.assertEqual(pending, [])
+        self.assertEqual(status["content_attempted"], 0)
+        mock_scrape.assert_not_called()
+
 
 class PefFetchSelectionTests(unittest.TestCase):
+    @patch.dict(
+        "os.environ",
+        {"PEF_SPECIALIST_NEWS_ENABLED": "false"},
+        clear=False,
+    )
+    @patch(
+        "main.scrape_article_content",
+        return_value={
+            "content": "사모펀드가 기업 경영권 인수를 추진하며 본입찰 조건을 검토하고 있습니다. " * 10,
+            "resolved_url": "https://publisher.example.com/deal/123",
+            "status": "ok",
+            "error": None,
+        },
+    )
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_pef_links_and_history_use_resolved_publisher_url(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        _mock_scrape,
+    ):
+        entry = SimpleNamespace(
+            title="KKR, A사 경영권 인수 본입찰 - 더벨",
+            link="https://news.google.com/rss/articles/google-token?oc=5",
+            published="2026-08-11",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[entry])
+
+        _context, links, _seen, pending, status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 11),
+        )
+
+        self.assertEqual(
+            links,
+            [(entry.title, "https://publisher.example.com/deal/123")],
+        )
+        self.assertEqual(pending[0]["link"], "https://publisher.example.com/deal/123")
+        self.assertEqual(status["content_usable"], 1)
+        self.assertFalse(status["content_outage"])
+
+    @patch.dict(
+        "os.environ",
+        {"PEF_SPECIALIST_NEWS_ENABLED": "false"},
+        clear=False,
+    )
+    @patch(
+        "main.scrape_article_content",
+        return_value={
+            "content": "TPG가 롯데렌탈 경영권 인수와 공개매수를 추진하는 거래 기사입니다. " * 10,
+            "resolved_url": "https://publisher.example.com/tpg-lotte-rental",
+            "status": "ok",
+            "error": None,
+        },
+    )
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_pef_skips_same_headline_and_source_before_url_resolution(
+        self,
+        _mock_get,
+        mock_parse_feed,
+        mock_scrape,
+    ):
+        title = "TPG, 롯데렌탈 품는다…잔여지분 공개매수도 착수 - 매일경제"
+        first = SimpleNamespace(
+            title=title,
+            link="https://news.google.com/rss/articles/token-one?oc=5",
+            published="2026-08-11",
+        )
+        duplicate = SimpleNamespace(
+            title=title,
+            link="https://news.google.com/rss/articles/token-two?oc=5",
+            published="2026-08-11",
+        )
+        mock_parse_feed.return_value = SimpleNamespace(entries=[first, duplicate])
+
+        context, links, _seen, pending, status = main.fetch_news(
+            mode="weekday",
+            target="pef",
+            collected_date=date(2026, 8, 11),
+        )
+
+        self.assertIn("롯데렌탈", context)
+        self.assertEqual(len(links), 1)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(status["content_attempted"], 1)
+        mock_scrape.assert_called_once()
+
     @patch.dict(
         "os.environ",
         {
@@ -952,6 +1306,8 @@ class BondMarketTests(unittest.TestCase):
         <val6>0</val6><val9>-</val9></BISComDspDatDTO>
         <BISComDspDatDTO><val1>졸스37</val1><val3>20260723</val3>
         <val6>0</val6><val9>-</val9></BISComDspDatDTO>
+        <BISComDspDatDTO><val1>통화안정증권DC026-1110-0910</val1><val3>20260723</val3>
+        <val6>5000</val6><val9>-</val9></BISComDspDatDTO>
         </message></root>""".encode("utf-8")
 
         records, pending_records, excluded_counts = main.parse_kofia_issuance_response(
@@ -969,6 +1325,8 @@ class BondMarketTests(unittest.TestCase):
         )
         self.assertEqual(categories["여전채"][0]["issuer"], "삼성카드")
         self.assertEqual(excluded_counts["mezzanine"], 1)
+        self.assertEqual(excluded_counts["non_target"], 1)
+        self.assertEqual(categories["회사채"], [])
         self.assertEqual(
             [record["issuer"] for record in pending_records],
             ["한국철도공사", "한국투자증권"],
@@ -1021,6 +1379,19 @@ class BondMarketTests(unittest.TestCase):
             main.classify_kofia_bond("한국수출입금융 2607타-이표-2"),
             "은행채",
         )
+
+    def test_kofia_maps_land_housing_bond_to_public_corporation(self):
+        xml = """<?xml version="1.0" encoding="UTF-8"?>
+        <root><message><proframeHeader><pfmResponseDtal/></proframeHeader>
+        <BISComDspDatDTO><val1>토지주택채권625</val1><val3>20260811</val3>
+        <val6>1000</val6><val9>4.83</val9></BISComDspDatDTO>
+        </message></root>""".encode("utf-8")
+
+        records = main.parse_kofia_issuance_response(xml)
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["issuer"], "한국토지주택공사")
+        self.assertEqual(records[0]["category"], "공사채")
 
     def test_parses_nh_syndication_schedule_rows(self):
         pdf_text = """

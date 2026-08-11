@@ -20,6 +20,7 @@
 - **수집 상태 구분**: 정상적인 신규 뉴스 0건, 일부 RSS 장애, 전체 RSS 장애를 구분해 장애를 `신규 뉴스 없음`으로 잘못 표시하지 않습니다.
 - **주말 수익률**: 토·일요일 브리핑은 전일 등락률이 아닌 약 1주 전 최근 거래일 대비 주간 등락률을 사용합니다.
 - **월요일 주말 보강**: 평일 cron에서 토·일 실행을 제외해도 월요일에는 최근 3일 뉴스를 조회하고, 주말 글로벌 뉴스와 이번 주 주요 일정을 추가 확인합니다.
+- **Google News 원문 해석**: Google RSS 중간 링크를 실제 언론사 URL로 변환한 뒤 JSON-LD와 기사 문단에서 본문을 추출합니다. 원문 해석이 전면 실패하면 `신규 뉴스 없음` 대신 본문 수집 장애를 알립니다.
 - **텔레그램 알림**: 생성된 보고서를 지정된 Telegram 채널로 자동 전송합니다. (PEF 브리핑 채널 분리 가능)
 - **HTML 이메일 배포**: Telegram 전송 시도 후 일반/PEF 수신자 그룹에 브리핑을 multipart HTML 이메일로 별도 배포합니다. PEF 이메일에는 관련 뉴스 링크도 한 통에 포함됩니다.
 - **휴장일 자동 감지**:
@@ -138,6 +139,12 @@ NEWS_LOOKBACK_DAYS=1
 NEWS_MAX_ARTICLES_PER_QUERY=3
 MONDAY_NEWS_LOOKBACK_DAYS=3
 MONDAY_NEWS_MAX_ARTICLES_PER_QUERY=5
+# Google News 원문 URL 해석 및 언론사 본문 수집
+GOOGLE_NEWS_RESOLVE_TIMEOUT_SECONDS=10
+GOOGLE_NEWS_RESOLVE_INTERVAL_SECONDS=2.0
+GOOGLE_NEWS_RATE_LIMIT_COOLDOWN_SECONDS=120
+ARTICLE_FETCH_TIMEOUT_SECONDS=10
+ARTICLE_CONTENT_MAX_CHARS=2000
 ```
 
 ## 📖 사용 방법 (Usage)
@@ -149,7 +156,7 @@ python main.py
 ```
 운영 cron을 월~금에만 실행해도 됩니다. 월요일은 `weekday` 모드를 유지하면서 최근 3일의 주말 뉴스와 이번 주 일정 쿼리를 자동으로 추가하고, 토·일요일 모드는 수동 실행용으로 남아 있습니다.
 
-PEF 관심 기업은 `pef_watchlist.json`에서 관리합니다. 기본값은 `모토닉`, `페퍼저축은행`이며 `aliases`에 기사에서 사용할 수 있는 다른 표기를 추가할 수 있습니다. 월요일에는 관심 기업 뉴스도 최근 3일을 확인하고, 한 번 전송 완료된 기사는 기존 PEF 뉴스 히스토리 기준으로 다시 보내지 않습니다.
+PEF 관심 기업은 `pef_watchlist.json`에서 관리합니다. 기본값은 `모토닉`, `페퍼저축은행`, `세우글로벌`이며 `aliases`에 기사에서 사용할 수 있는 다른 표기를 추가할 수 있습니다. 월요일에는 관심 기업 뉴스도 최근 3일을 확인하고, 한 번 전송 완료된 기사는 기존 PEF 뉴스 히스토리 기준으로 다시 보내지 않습니다.
 
 채권 일정 히스토리를 처음 활성화한 날에는 45일 이내 NH 대표주관 일정을 `기준 일정`으로 모두 표시합니다. 이후에는 신규·변경·당일 일정만 상세 표시하고, 변경 없는 종목은 한 줄로 축약합니다. 현재 NH 자료가 stale이거나 수집에 실패하면 `.bond_history.json`을 갱신하지 않으며, 설정된 PEF 전송 채널이 모두 성공한 경우에만 새 스냅샷을 저장합니다.
 
