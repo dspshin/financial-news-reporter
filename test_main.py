@@ -746,12 +746,23 @@ class NewsScheduleTests(unittest.TestCase):
 
 
 class PefWatchlistTests(unittest.TestCase):
+    def test_watchlist_matching_tolerates_korean_spacing(self):
+        self.assertTrue(
+            main.watchlist_company_matches(
+                main.normalize_text("세우 글로벌, 신규 사업 추진"),
+                ["세우글로벌"],
+            )
+        )
+
     def test_default_watchlist_includes_sewoo_global(self):
         watchlist_path = Path(__file__).with_name("pef_watchlist.json")
 
         watchlist = main.load_pef_watchlist(str(watchlist_path))
 
-        self.assertIn("세우글로벌", [company["name"] for company in watchlist])
+        sewoo_global = next(
+            company for company in watchlist if company["name"] == "세우글로벌"
+        )
+        self.assertIn("SEWOO GLOBAL", sewoo_global["aliases"])
 
     def test_loads_and_normalizes_watchlist_file(self):
         with tempfile.TemporaryDirectory() as temp_dir:
