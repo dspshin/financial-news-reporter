@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import dotenv_values
+from morning_market_day import validate_market_day
 
 ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
@@ -65,15 +66,16 @@ def check_channel(token, channel):
 
 def validate_bundle(folder, now):
     day = now.date().isoformat()
-    if now.weekday() >= 5 or now.hour < 8:
-        raise ValueError("Publishing is restricted to weekdays after 08:00 KST")
+    if now.weekday() >= 5 or (now.hour, now.minute) < (7, 40):
+        raise ValueError("Publishing is restricted to weekdays at or after 07:40 KST")
     if folder.name != f"{day}-am":
         raise ValueError("Bundle must belong to today's KST morning edition")
     qa = json.loads((folder / "qa.json").read_text(encoding="utf-8"))
     if qa.get("status") != "passed" or qa.get("date") != day:
         raise ValueError("Today's visual/data review must be marked passed")
-    if qa.get("cutoff") != f"{day}T08:00:00+09:00":
-        raise ValueError("Review cutoff must be today's 08:00 Asia/Seoul")
+    if qa.get("cutoff") != f"{day}T07:40:00+09:00":
+        raise ValueError("Review cutoff must be today's 07:40 Asia/Seoul")
+    validate_market_day(qa.get("market_day"), now)
     for filename in ("briefing.png", "manuscript.txt", "sources.md", "caption.txt"):
         path = folder / filename
         if not path.is_file() or not path.stat().st_size:
@@ -87,8 +89,8 @@ def validate_bundle(folder, now):
     if width != height or width < 1000 or width + height > 10000:
         raise ValueError("Image must be square, at least 1000 px and fit Telegram photo limits")
     caption = (folder / "caption.txt").read_text(encoding="utf-8").strip()
-    if len(caption.encode("utf-16-le")) // 2 > 1024 or day not in caption or "08:00" not in caption:
-        raise ValueError("Caption needs edition date and 08:00 cutoff, within 1024 characters")
+    if len(caption.encode("utf-16-le")) // 2 > 1024 or day not in caption or "07:40" not in caption:
+        raise ValueError("Caption needs edition date and 07:40 cutoff, within 1024 characters")
     return caption
 
 

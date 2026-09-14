@@ -25,3 +25,5 @@ env/
 .news_history.json
 .bond_history.json
 .morning_image_delivery/
+.morning_kakao_delivery/
+.kakao_morning.json
