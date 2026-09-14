@@ -1,0 +1,11 @@
+{
+  "status": "passed",
+  "date": "2026-09-14",
+  "cutoff": "2026-09-14T08:00:00+09:00",
+  "sha256": {
+    "briefing.png": "dfd24b3f72f42aabeb8c47d64bb36347fabafbe4b926593a94941e96f814f5e3",
+    "manuscript.txt": "eb73ca5108e67f3ec0ea4cb450d76c3e2b8f326781f4ca0597521be43e2e2ef9",
+    "sources.md": "66987127db16ebf3463ba6a03fef28007a3c78240c0c0bb2074f1a3eb087ae09",
+    "caption.txt": "69284fde81f6f2fd7a7c7054e41481df44d6f81381404c1301d6a2d67d41be0f"
+  }
+}

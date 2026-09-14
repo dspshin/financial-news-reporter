@@ -1,0 +1,71 @@
+Use case: infographic-diagram
+Create one finished Korean market briefing infographic, square, high resolution 2560x2560 if possible, maximum Korean text legibility. New image, not an edit. Visual style: white paper, black pen sketchnote, light sky blue hand-drawn title ribbons, soft pastel callout boxes, confident black handwritten title but very clear neatly typeset Korean body. Exactly SIX numbered panels in a strict 3-column by 2-row grid, with header above and full width 3-line summary and next variables strip below. Keep decorations small to reserve space for text: tiny US and Korean flags, chip icon, oil barrel, currency symbols, and a cute professional FEMALE chibi analyst with dark ponytail, white blouse and tablet in header right. Only female human characters. No male characters. Up values and upward arrows RED; down values and downward arrows GREEN; neutral values GRAY. CPI number positive may use black to avoid interpreting economic data as prices. No fabricated chart, no line chart; all are number cards. No signature, no watermark, no copied news or numbers from external images. No extra text or extra claims.
+
+All text to print follows verbatim below. You may wrap lines for readability but do not change text, dates, decimal digits, tickers, plus/minus signs or meanings. Keep dates and session labels on every panel. Use the exact six numbered headings. Body text is priority over decoration. Layout: panel 1 and panel 2 and panel 3 top row; panel 4 and panel 5 and panel 6 bottom row. Use larger bold numbers; explanatory text modest but crisp and legible. Footer must remain readable. Keep whole square uncropped with margins. Female analyst's small speech bubble is not needed; do not invent any.
+Text verbatim:
+9/14(월) 아침 시황
+미국은 반등했지만, 주말 중동 변수로 유가 위험을 다시 확인할 때.
+2026 오전판 | 미국 9/11 종가 · 한국 9/14 개장 전
+
+① 미국 증시
+미국 9/11 정규장 종가 · pt · 전일 대비
+다우 52,573.29  +0.98% ↑
+S&P500 7,656.98  +0.86% ↑
+나스닥 26,333.04  +0.96% ↑
+러셀2000 2,903.94  +0.45% ↑
+필라델피아 반도체 11,824.00  +1.81% ↑
+해석: 유가 하락이 반등에 영향을 준 것으로 해석.
+
+② 주요 이슈
+사실 → 시장 의미(해석)
+8월 미국 CPI 전월비 +0.4% (예상 +0.4%)
+근원 +0.3% (예상 +0.2%) → 금리 부담 지속.
+9/13 사우디 송유관 공급차질 보도
+→ 원유 공급 불안과 유가 재상승 위험.
+9/13 호르무즈 관련 회의 연기 보도
+→ 해협 통항 정상화는 여전히 불확실.
+
+③ 국제유가·금리
+WTI 100.05달러/배럴  −2.37% ↓
+NYMEX 2026년 10월물 · 9/11 결제
+미 국채 2년 4.644%  +9.4bp ↑
+미 국채 10년 4.975%  +3.1bp ↑
+금리: 9/11 일간 종가 · 전일 대비 · Investing.com
+해석: 유가는 내렸지만 금리 부담은 남았다.
+
+④ 주도 업종·주요 종목
+서버·네트워크 강세 | 미국 9/11 종가 등락률
+델(DELL) +11.98% ↑ · RBC 신규 긍정 평가
+HPE +12.44% ↑ · 오라클 실적발 투자 기대
+시스코(CSCO) +4.37% ↑ · 다우 내 상승률 1위
+엔비디아(NVDA) −0.03% ↓ · 개별 재료 미확인
+해석: AI 투자 기대가 서버주 강세에 영향을 준 것으로 해석.
+
+⑤ 한국장 사전 신호
+iShares MSCI South Korea ETF (EWY)
+188.72달러  +3.25% ↑
+미국 9/11 정규장 종가 · 전일 대비
+KOSPI200 야간선물: 미확인
+월물·해당 세션 종가 검증 불가로 수치 제외.
+해석: ETF 상승만으로 한국장 상승을 확정할 수 없다.
+
+⑥ 환율·오늘 체크포인트
+달러/원 현물 1,345.9원  +6.7원 ↑
+9/11 15:30 KST 기준가 · 전일 같은 시각 대비
+NDF 1개월물: 미확인
+오늘 09:00 한국 정규장 · 21:30 미국 정규장 개장
+오늘 미국 주요 경제지표 발표는 없음(확인한 일정).
+관찰: 개장 후 원화 방향·외국인 수급·유가.
+
+3줄 요약
+1. 미국 5개 지수 반등, 서버·네트워크가 강세.
+2. 주말 중동 뉴스로 금요일 유가 하락의 지속성 재점검.
+3. 한국 ETF 반등에도 국내장 방향은 개장 후 확인.
+
+다음에 확인할 변수
+유가 재상승 여부 · 원화·외국인 수급 · 9/17 03:00 KST FOMC 결정
+
+기준: 2026.09.14 08:00 Asia/Seoul | 이후 정보 제외
+미국 9/11 정규장 마감 = 한국 9/12 05:00
+실시간 자료 아님. 야간선물·NDF 미확인, 환율은 9/11 15:30 값.
+금리 관측시각은 공급사 미제공. 빨강 상승 / 초록 하락 / 회색 보합.

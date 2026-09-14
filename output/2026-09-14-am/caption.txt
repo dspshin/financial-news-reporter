@@ -1,0 +1,8 @@
+2026-09-14 아침 시황
+정보 기준: 08:00 KST · 미국 9/11 종가와 주말 뉴스
+미국은 반등했지만, 주말 중동 변수로 유가 위험을 다시 확인할 때.
+야간선물·NDF 미확인. 환율은 9/11 15:30 기준가.
+주요 출처
+미국 물가: https://www.bls.gov/news.release/archives/cpi_09112026.htm
+반도체 지수: https://indexes.nasdaq.com/Index/History/SOX
+FOMC: https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
