@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -84,6 +86,49 @@ class MorningPublisherTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as error:
             publisher.api("secret-token", "getMe")
         self.assertNotIn("secret-token", str(error.exception))
+
+    @patch.object(publisher, "api", return_value={"message_id": 123, "photo": [{}]})
+    def test_pending_checkpoint_is_written_before_send(self, api):
+        def on_pending():
+            record = json.loads(next((self.root / "receipts").glob("*.json")).read_text())
+            self.assertEqual(record["status"], "pending")
+            api.assert_not_called()
+        result = publisher.publish(self.folder, "test", -1234, "caption",
+                                   self.root / "receipts", on_pending=on_pending)
+        self.assertEqual(result["status"], "sent")
+
+    @patch.object(publisher, "api")
+    def test_pending_checkpoint_failure_does_not_send(self, api):
+        def on_pending():
+            raise OSError("state disk unavailable")
+        args = (self.folder, "test", -1234, "caption", self.root / "receipts")
+        with self.assertRaises(OSError):
+            publisher.publish(*args, on_pending=on_pending)
+        with self.assertRaises(RuntimeError):
+            publisher.publish(*args)
+        api.assert_not_called()
+
+    @patch.object(publisher, "api", return_value={"message_id": 123, "photo": [{}]})
+    def test_cli_syncs_pending_and_sent_even_if_final_summary_write_fails(self, api):
+        observed = []
+        def sync(folder, root):
+            record = json.loads(next((root / ".morning_image_delivery").glob("*.json")).read_text())
+            observed.append(record["status"])
+            if record["status"] == "sent":
+                raise OSError("summary write failed")
+        with patch.object(publisher, "ROOT", self.root), \
+                patch.object(publisher, "validate_bundle", return_value="caption"), \
+                patch.object(publisher, "credentials", return_value=("test", "channel")), \
+                patch.object(publisher, "check_channel", return_value={"id": -1234}), \
+                patch("morning_delivery_status.reconcile", side_effect=sync), \
+                patch("sys.argv", ["publisher", "--bundle", str(self.folder)]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(OSError):
+                publisher.main()
+        self.assertEqual(observed, ["pending", "sent"])
+        record = json.loads(next((self.root / ".morning_image_delivery").glob("*.json")).read_text())
+        self.assertEqual(record["status"], "sent")
+        self.assertEqual(api.call_count, 1)
 
 
 if __name__ == "__main__":

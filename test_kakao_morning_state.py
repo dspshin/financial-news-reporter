@@ -1,3 +1,5 @@
+import contextlib
+import io
 import hashlib
 import json
 import tempfile
@@ -6,7 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-from kakao_morning_state import KST, begin, finish, receipt_path
+import kakao_morning_state as kakao
+
+from kakao_morning_state import KST, begin, finish, checkpoint, skip, receipt_path, configured_rooms, select_room, require_room_active
 
 
 class KakaoDeliveryTests(unittest.TestCase):
@@ -69,6 +73,109 @@ class KakaoDeliveryTests(unittest.TestCase):
         finish(self.folder, "target", self.state, "uncertain", "Connection lost", self.now)
         with self.assertRaises(ValueError):
             begin(self.folder, "target", "target", self.state, self.now)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_next_room_requires_first_room_success_and_same_image(self, validate):
+        first, second = "x삼성 투자방", "금복회 장자풍도 60대下"
+        def start_second():
+            return begin(self.folder, second, second, self.state, self.now, [first])
+        with self.assertRaises(ValueError):
+            start_second()
+        begin(self.folder, first, first, self.state, self.now)
+        with self.assertRaises(ValueError):
+            start_second()
+        finish(self.folder, first, self.state, "sent", "First outgoing image visible", self.now)
+        path = receipt_path(self.state, self.folder, first)
+        original = json.loads(path.read_text())
+        for change in ({"status": "uncertain"}, {"image_sha256": "different"},
+                       {"room": second}, {"edition": "2026-09-11-am"}):
+            with self.subTest(change=change):
+                path.write_text(json.dumps(original | change))
+                with self.assertRaises(ValueError):
+                    start_second()
+                self.assertFalse(receipt_path(self.state, self.folder, second).exists())
+        path.write_text(json.dumps(original))
+        record = start_second()
+        self.assertEqual(record["previous_kakao_receipts"], [path.name])
+        finish(self.folder, second, self.state, "sent", "Second outgoing image visible", self.now)
+        with self.assertRaises(ValueError):
+            start_second()
+        self.assertEqual(json.loads(path.read_text()), original)
+
+    def test_config_and_explicit_room_selection(self):
+        self.assertEqual(configured_rooms({"room_name": "legacy"}), ["legacy"])
+        rooms = configured_rooms({"room_names": ["first", "second"]})
+        self.assertEqual(select_room(rooms, "second"), "second")
+        self.assertEqual(select_room(["legacy"], None), "legacy")
+        for requested in (None, "unapproved", "second "):
+            with self.assertRaises(ValueError):
+                select_room(rooms, requested)
+        for config in ({}, {"room_names": []}, {"room_names": "first"},
+                       {"room_names": ["first", "first"]}, {"room_names": [" first"]},
+                       {"room_names": ["first"], "room_name": "other"}):
+            with self.assertRaises(ValueError):
+                configured_rooms(config)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_ui_checkpoints_never_reset_or_repeat_send_requested(self, validate):
+        begin(self.folder, "target", "target", self.state, self.now)
+        for phase in ("file_selected", "attachment_ready", "send_requested"):
+            checkpoint(self.folder, "target", "target", self.state, phase, "UI verified", self.now)
+        for phase in ("file_selected", "attachment_ready", "send_requested"):
+            with self.assertRaises(ValueError):
+                checkpoint(self.folder, "target", "target", self.state, phase, "UI verified", self.now)
+        with self.assertRaises(ValueError):
+            skip(self.folder, "target", self.state, "not_logged_in", "Login screen", self.now)
+        finish(self.folder, "target", self.state, "sent", "Outgoing image visible", self.now)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_skip_requires_allowed_reason_and_cannot_overwrite_sent(self, validate):
+        with self.assertRaises(ValueError):
+            skip(self.folder, "target", self.state, "timeout", "Stopped", self.now)
+        begin(self.folder, "target", "target", self.state, self.now)
+        record = skip(self.folder, "target", self.state, "not_logged_in", "Login screen", self.now)
+        self.assertEqual(record["status"], "skipped")
+        with self.assertRaises(ValueError):
+            begin(self.folder, "target", "target", self.state, self.now)
+        begin(self.folder, "second", "second", self.state, self.now)
+        finish(self.folder, "second", self.state, "sent", "Outgoing image", self.now)
+        with self.assertRaises(ValueError):
+            skip(self.folder, "second", self.state, "os_locked", "Locked", self.now)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_checkpoints_reject_wrong_room_changed_image_and_skipped_phases(self, validate):
+        begin(self.folder, "target", "target", self.state, self.now)
+        for room, phase in (("wrong", "file_selected"), ("target", "send_requested")):
+            with self.assertRaises(ValueError):
+                checkpoint(self.folder, "target", room, self.state, phase, "Observed", self.now)
+        (self.folder / "briefing.png").write_bytes(b"different")
+        with self.assertRaises(ValueError):
+            checkpoint(self.folder, "target", "target", self.state, "file_selected", "Observed", self.now)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_cli_automatically_syncs_begin_checkpoint_and_sent(self, validate):
+        (self.root / ".kakao_morning.json").write_text(json.dumps({"room_names": ["target"]}))
+        base = ["kakao", "--bundle", str(self.folder), "--room", "target"]
+        cases = [(["begin", "--observed-room", "target"], "pending", "room_verified"),
+                 (["checkpoint", "--observed-room", "target", "--phase", "file_selected", "--evidence", "Selected PNG"], "pending", "file_selected"),
+                 (["sent", "--evidence", "Observed outgoing image"], "sent", "file_selected")]
+        for args, status, phase in cases:
+            with patch("sys.argv", base + args), contextlib.redirect_stdout(io.StringIO()):
+                kakao.main()
+            summary = json.loads((self.folder / "run-status.json").read_text())
+            self.assertEqual(summary["deliveries"]["target"]["status"], status)
+            self.assertEqual(summary["deliveries"]["target"]["ui_phase"], phase)
+
+    def test_new_room_cannot_start_before_authorized_date(self):
+        config = {"room_names": ["first", "second"],
+                  "room_start_dates": {"second": "2026-09-16"}}
+        require_room_active(config, "first", self.now)
+        with self.assertRaises(ValueError):
+            require_room_active(config, "second", datetime(2026, 9, 15, 23, 59, tzinfo=KST))
+        require_room_active(config, "second", datetime(2026, 9, 16, 7, 40, tzinfo=KST))
+        for starts in ({"other": "2026-09-16"}, {"second": "tomorrow"}, []):
+            with self.assertRaises(ValueError):
+                require_room_active(config | {"room_start_dates": starts}, "second", self.now)
 
 
 if __name__ == "__main__":

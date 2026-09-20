@@ -103,7 +103,7 @@ def save_receipt(path, receipt):
     temporary.replace(path)
 
 
-def publish(folder, token, channel, caption, state_root):
+def publish(folder, token, channel, caption, state_root, on_pending=None):
     state_root.mkdir(parents=True, exist_ok=True)
     destination_key = hashlib.sha256(str(channel).encode()).hexdigest()[:16]
     receipt_path = state_root / f"{folder.name}-{destination_key}.json"
@@ -120,6 +120,10 @@ def publish(folder, token, channel, caption, state_root):
         if previous.get("status") == "sent":
             return {"status": "already_sent", "message_id": previous["message_id"]}
         raise RuntimeError("Existing unresolved/rejected delivery: inspect receipt and channel; do not resend automatically")
+    if on_pending is not None:
+        # Persist the outstanding action before the network call. A failure here
+        # leaves a pending receipt and must not result in an automatic resend.
+        on_pending()
     try:
         with (folder / "briefing.png").open("rb") as photo:
             result = api(token, "sendPhoto", {"chat_id": channel, "caption": caption},
@@ -155,7 +159,14 @@ def main():
         return
     token, channel = credentials()
     chat = check_channel(token, channel)
-    result = publish(folder, token, chat["id"], caption, ROOT / ".morning_image_delivery")
+    from morning_delivery_status import reconcile
+    try:
+        result = publish(folder, token, chat["id"], caption, ROOT / ".morning_image_delivery",
+                         on_pending=lambda: reconcile(folder, ROOT))
+    finally:
+        # Outside publish's exception handler: a summary write failure must
+        # never turn an acknowledged Telegram success into an uncertain send.
+        reconcile(folder, ROOT)
     print(json.dumps(result))
 
 
