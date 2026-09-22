@@ -1,0 +1,49 @@
+{
+  "purpose": "오전 발행 이후 KRX 재로그인 및 야간선물 조회 검증. 기존 발행 원고·이미지·출처 기록은 변경하지 않음.",
+  "verified_at": "2026-09-22T09:27:20+09:00",
+  "source_url": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201050103",
+  "screen": "15003 최근월물 시세 추이(선물)",
+  "access_result": "Chrome 정상 로그인. 사용자 승인에 따라 중복 로그인 경고에서 기존 KRX 세션을 로그아웃하고 새 세션으로 전환한 후 조회 성공.",
+  "product": "코스피200 선물",
+  "contract_name": "코스피200 F 202612",
+  "contract_month": "2026-12",
+  "contract_code": "A016C000",
+  "night": {
+    "filters": {
+      "상품구분": "코스피200 선물",
+      "시장구분": "야간",
+      "시작일": "20260922",
+      "종료일": "20260922"
+    },
+    "krx_trade_date": "2026-09-22",
+    "row_date_label": "2026/09/22 (야간)",
+    "price_type": "야간 종가",
+    "close": "1137.00",
+    "table_displayed_at": "2026-09-22T09:25:34+09:00",
+    "delay_label": "20분 지연 정보",
+    "table_change_magnitude": "21.90"
+  },
+  "comparison": {
+    "filters": {
+      "상품구분": "코스피200 선물",
+      "시장구분": "정규",
+      "시작일": "20260921",
+      "종료일": "20260921"
+    },
+    "krx_trade_date": "2026-09-21",
+    "row_date_label": "2026/09/21 (주간)",
+    "price_type": "동일 월물 직전 정규장 종가",
+    "close": "1115.10",
+    "table_displayed_at": "2026-09-22T09:25:59+09:00",
+    "delay_label": "20분 지연 정보"
+  },
+  "change_points": "21.90",
+  "change_percent": "1.96",
+  "formula": "(1137.00 / 1115.10 - 1) * 100",
+  "publication_time": null,
+  "notes": [
+    "조회시각과 표 머리글 시각은 야간 마감시각이 아님.",
+    "이 사후 조회만으로 07:40 이전 공표시각까지 검증한 것은 아님.",
+    "다음 발행에는 당시 최신 거래일·월물을 새로 조회할 것."
+  ]
+}
