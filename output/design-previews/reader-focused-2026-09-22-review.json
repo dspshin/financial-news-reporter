@@ -1,0 +1,24 @@
+{
+  "artifact_type": "design_preview",
+  "not_for_automatic_publication": true,
+  "reviewed_at": "2026-09-22T11:55:37+09:00",
+  "image_file": "reader-focused-2026-09-22.png",
+  "image_sha256": "465690c1526db9939f9bb8f2af64770610ec372801c35bdd82e3c8534db56dfa",
+  "generator": "built-in image_gen",
+  "visual_review": {
+    "date_weekday": true,
+    "index_and_stock_values_signs_arrows": true,
+    "wti_contract_settlement_yields_bp": true,
+    "night_futures_value_comparison_and_retrospective_label": true,
+    "ewy_and_fx_values_observation_labels": true,
+    "korea_connection_and_opening_conditions": true,
+    "event_time_and_observation_point": true,
+    "korean_text_readability": true,
+    "channel_url": true
+  },
+  "limitations": [
+    "테스트 시안. 야간선물은 발행 후 09:25 확인값임을 이미지에 명시.",
+    "기존 07:40 원고 기반이며 이후 국내장 결과는 반영하지 않음."
+  ],
+  "delivery": "not_requested_not_sent"
+}
