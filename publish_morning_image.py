@@ -66,15 +66,15 @@ def check_channel(token, channel):
 
 def validate_bundle(folder, now):
     day = now.date().isoformat()
-    if now.weekday() >= 5 or (now.hour, now.minute) < (7, 40):
-        raise ValueError("Publishing is restricted to weekdays at or after 07:40 KST")
+    if now.weekday() >= 5 or (now.hour, now.minute) < (7, 35):
+        raise ValueError("Publishing is restricted to weekdays at or after 07:35 KST")
     if folder.name != f"{day}-am":
         raise ValueError("Bundle must belong to today's KST morning edition")
     qa = json.loads((folder / "qa.json").read_text(encoding="utf-8"))
     if qa.get("status") != "passed" or qa.get("date") != day:
         raise ValueError("Today's visual/data review must be marked passed")
-    if qa.get("cutoff") != f"{day}T07:40:00+09:00":
-        raise ValueError("Review cutoff must be today's 07:40 Asia/Seoul")
+    if qa.get("cutoff") != f"{day}T07:35:00+09:00":
+        raise ValueError("Review cutoff must be today's 07:35 Asia/Seoul")
     validate_market_day(qa.get("market_day"), now)
     for filename in ("briefing.png", "manuscript.txt", "sources.md", "caption.txt"):
         path = folder / filename
@@ -89,8 +89,8 @@ def validate_bundle(folder, now):
     if width != height or width < 1000 or width + height > 10000:
         raise ValueError("Image must be square, at least 1000 px and fit Telegram photo limits")
     caption = (folder / "caption.txt").read_text(encoding="utf-8").strip()
-    if len(caption.encode("utf-16-le")) // 2 > 1024 or day not in caption or "07:40" not in caption:
-        raise ValueError("Caption needs edition date and 07:40 cutoff, within 1024 characters")
+    if len(caption.encode("utf-16-le")) // 2 > 1024 or day not in caption or "07:35" not in caption:
+        raise ValueError("Caption needs edition date and 07:35 cutoff, within 1024 characters")
     return caption
 
 

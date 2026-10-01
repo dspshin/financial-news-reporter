@@ -22,17 +22,17 @@ class MorningPublisherTests(unittest.TestCase):
         (self.folder / "briefing.png").write_bytes(header)
         for name in ("manuscript.txt", "sources.md"):
             (self.folder / name).write_text("reviewed", encoding="utf-8")
-        (self.folder / "caption.txt").write_text("2026-09-15 아침 시황 · 07:40 KST", encoding="utf-8")
-        self.qa = {"status": "passed", "date": "2026-09-15", "cutoff": "2026-09-15T07:40:00+09:00",
+        (self.folder / "caption.txt").write_text("2026-09-15 아침 시황 · 07:35 KST", encoding="utf-8")
+        self.qa = {"status": "passed", "date": "2026-09-15", "cutoff": "2026-09-15T07:35:00+09:00",
                    "market_day": {"date": "2026-09-15", "status": "open",
-                                  "checked_at": "2026-09-15T07:40:00+09:00",
+                                  "checked_at": "2026-09-15T07:35:00+09:00",
                                   "sources": ["https://open.krx.co.kr/"]},
                    "sha256": {p.name: publisher.sha256(p) for p in self.folder.iterdir()}}
         (self.folder / "qa.json").write_text(json.dumps(self.qa), encoding="utf-8")
         self.now = datetime(2026, 9, 15, 7, 50, tzinfo=publisher.KST)
 
     def test_valid_bundle_and_reject_changed_image(self):
-        self.assertIn("07:40", publisher.validate_bundle(self.folder, self.now))
+        self.assertIn("07:35", publisher.validate_bundle(self.folder, self.now))
         with (self.folder / "briefing.png").open("ab") as handle:
             handle.write(b"changed")
         with self.assertRaisesRegex(ValueError, "changed after review"):
@@ -41,8 +41,8 @@ class MorningPublisherTests(unittest.TestCase):
     def test_reject_stale_edition_and_early_run(self):
         with self.assertRaisesRegex(ValueError, "today"):
             publisher.validate_bundle(self.folder, self.now.replace(day=16))
-        with self.assertRaisesRegex(ValueError, "07:40"):
-            publisher.validate_bundle(self.folder, self.now.replace(hour=7, minute=39, second=59))
+        with self.assertRaisesRegex(ValueError, "07:35"):
+            publisher.validate_bundle(self.folder, self.now.replace(hour=7, minute=34, second=59))
 
     def test_missing_market_day_check_blocks_publishing(self):
         del self.qa["market_day"]
@@ -50,14 +50,14 @@ class MorningPublisherTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "market opening"):
             publisher.validate_bundle(self.folder, self.now)
 
-    def test_new_cutoff_allows_0740_and_rejects_old_review_and_caption(self):
-        self.assertIn("07:40", publisher.validate_bundle(self.folder, self.now.replace(minute=40)))
-        self.qa["cutoff"] = "2026-09-15T08:00:00+09:00"
+    def test_new_cutoff_allows_0735_and_rejects_old_review_and_caption(self):
+        self.assertIn("07:35", publisher.validate_bundle(self.folder, self.now.replace(minute=35)))
+        self.qa["cutoff"] = "2026-09-15T07:40:00+09:00"
         (self.folder / "qa.json").write_text(json.dumps(self.qa), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "cutoff"):
             publisher.validate_bundle(self.folder, self.now)
-        self.qa["cutoff"] = "2026-09-15T07:40:00+09:00"
-        (self.folder / "caption.txt").write_text("2026-09-15 아침 시황 · 08:00 KST", encoding="utf-8")
+        self.qa["cutoff"] = "2026-09-15T07:35:00+09:00"
+        (self.folder / "caption.txt").write_text("2026-09-15 아침 시황 · 07:40 KST", encoding="utf-8")
         self.qa["sha256"]["caption.txt"] = publisher.sha256(self.folder / "caption.txt")
         (self.folder / "qa.json").write_text(json.dumps(self.qa), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "Caption"):
