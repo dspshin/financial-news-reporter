@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 import kakao_morning_state as kakao
 
-from kakao_morning_state import KST, begin, finish, checkpoint, skip, receipt_path, configured_rooms, select_room, require_room_active
+from kakao_morning_state import (KST, begin, finish, checkpoint, skip, receipt_path,
+                                configured_rooms, select_room, require_room_active,
+                                begin_share, checkpoint_share, delivery_rooms, share_receipt_path)
 
 
 class KakaoDeliveryTests(unittest.TestCase):
@@ -176,6 +178,114 @@ class KakaoDeliveryTests(unittest.TestCase):
         for starts in ({"other": "2026-09-16"}, {"second": "tomorrow"}, []):
             with self.assertRaises(ValueError):
                 require_room_active(config | {"room_start_dates": starts}, "second", self.now)
+
+    def shared_config(self):
+        return {"room_names": ["first", "source", "third", "fourth"],
+                "share_delivery": {"effective_from": "2026-09-14", "source_room": "source",
+                                   "target_rooms": ["first", "third", "fourth"]}}
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_shared_delivery_requires_source_and_exact_remaining_selection(self, validate):
+        config = self.shared_config()
+        targets = config["share_delivery"]["target_rooms"]
+        with self.assertRaises(ValueError):
+            begin_share(self.folder, config, targets, "source", self.state, "Checked", self.now)
+        begin(self.folder, "source", "source", self.state, self.now)
+        with self.assertRaises(ValueError):
+            begin_share(self.folder, config, targets, "source", self.state, "Checked", self.now)
+        finish(self.folder, "source", self.state, "sent", "Source outgoing image", self.now)
+        for selected, source in ((targets[:2], "source"), (targets + ["other"], "source"),
+                                 (targets, "wrong"), (targets + [targets[0]], "source")):
+            with self.assertRaises(ValueError):
+                begin_share(self.folder, config, selected, source, self.state, "Checked", self.now)
+            self.assertFalse(share_receipt_path(self.state, self.folder).exists())
+        batch = begin_share(self.folder, config, targets, "source", self.state, "3 checked", self.now)
+        self.assertEqual(batch["ui_phase"], "share_selected")
+        with self.assertRaises(ValueError):
+            finish(self.folder, "first", self.state, "sent", "Selection closed", self.now)
+        checkpoint_share(self.folder, targets, "source", self.state, "Exact 3; confirm next", self.now)
+        with self.assertRaises(ValueError):
+            checkpoint_share(self.folder, targets, "source", self.state, "Retry click", self.now)
+        finish(self.folder, "third", self.state, "sent", "Third outgoing image visible", self.now)
+        finish(self.folder, "first", self.state, "uncertain", "First could not be read", self.now)
+        self.assertEqual(json.loads(receipt_path(self.state, self.folder, "fourth").read_text())["status"], "pending")
+        with self.assertRaises(ValueError):
+            begin_share(self.folder, config, targets, "source", self.state, "Retry", self.now)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_share_excludes_completed_rooms_and_preserves_source(self, validate):
+        config = self.shared_config()
+        for room in ("source", "first"):
+            begin(self.folder, room, room, self.state, self.now)
+            finish(self.folder, room, self.state, "sent", "Outgoing image visible", self.now)
+        source_path = receipt_path(self.state, self.folder, "source")
+        before = source_path.read_bytes()
+        with self.assertRaises(ValueError):
+            begin_share(self.folder, config, ["first", "third", "fourth"], "source", self.state, "Checked", self.now)
+        begin_share(self.folder, config, ["third", "fourth"], "source", self.state, "Remaining 2", self.now)
+        self.assertEqual(source_path.read_bytes(), before)
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_share_journal_blocks_resend_if_recipient_update_is_interrupted(self, validate):
+        from morning_delivery_status import read_record
+        config = self.shared_config()
+        targets = config["share_delivery"]["target_rooms"]
+        begin(self.folder, "source", "source", self.state, self.now)
+        finish(self.folder, "source", self.state, "sent", "Source visible", self.now)
+        begin_share(self.folder, config, targets, "source", self.state, "3 checked", self.now)
+        original_save = kakao.save_receipt
+        def interrupted(path, record):
+            if path != share_receipt_path(self.state, self.folder):
+                raise OSError("interrupted after batch intent saved")
+            original_save(path, record)
+        with patch.object(kakao, "save_receipt", side_effect=interrupted), self.assertRaises(OSError):
+            checkpoint_share(self.folder, targets, "source", self.state, "Confirm next", self.now)
+        record = read_record(receipt_path(self.state, self.folder, "first"), self.folder,
+                             self.telegram_record["image_sha256"], "first")
+        self.assertEqual(record["ui_phase"], "send_requested")
+        with self.assertRaises(ValueError):
+            skip(self.folder, "first", self.state, "os_locked", "Lock visible", self.now)
+        with self.assertRaises(ValueError):
+            checkpoint_share(self.folder, targets, "source", self.state, "Try again", self.now)
+
+    def test_new_delivery_order_is_not_applied_to_older_bundles(self):
+        config = self.shared_config()
+        self.assertEqual(delivery_rooms(config, datetime(2026, 9, 13).date()), config["room_names"])
+        self.assertEqual(delivery_rooms(config, self.now.date()), ["source", "first", "third", "fourth"])
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_share_cli_syncs_selection_intent_and_individual_results(self, validate):
+        (self.root / ".kakao_morning.json").write_text(json.dumps(self.shared_config()))
+        common = ["kakao", "--bundle", str(self.folder)]
+        def run(args):
+            with patch("sys.argv", common + args), contextlib.redirect_stdout(io.StringIO()):
+                kakao.main()
+            return json.loads((self.folder / "run-status.json").read_text())
+        run(["begin", "--room", "source", "--observed-room", "source"])
+        run(["sent", "--room", "source", "--evidence", "Source outgoing image"])
+        with self.assertRaises(ValueError):
+            run(["begin", "--room", "first", "--observed-room", "first"])
+        selection = ["--observed-room", "source", "--share-room", "first", "--share-room", "third",
+                     "--share-room", "fourth", "--evidence", "Source image; exact three checked"]
+        state = run(["share-begin"] + selection)
+        self.assertEqual(state["next_action"], "inspect_shared_selection_before_resume")
+        state = run(["share-checkpoint", "--phase", "send_requested"] + selection)
+        self.assertEqual(state["next_action"], "inspect_shared_delivery_no_resend")
+        for room in ("fourth", "third", "first"):
+            state = run(["sent", "--room", room, "--evidence", "Exact room; outgoing image/time"])
+        self.assertEqual(state["status"], "completed")
+
+    @patch("kakao_morning_state.validate_bundle")
+    def test_missing_recipient_cannot_be_skipped_after_batch_send_intent(self, validate):
+        config = self.shared_config()
+        targets = config["share_delivery"]["target_rooms"]
+        begin(self.folder, "source", "source", self.state, self.now)
+        finish(self.folder, "source", self.state, "sent", "Source visible", self.now)
+        begin_share(self.folder, config, targets, "source", self.state, "3 checked", self.now)
+        checkpoint_share(self.folder, targets, "source", self.state, "Confirm next", self.now)
+        receipt_path(self.state, self.folder, "third").unlink()
+        with self.assertRaises(ValueError):
+            skip(self.folder, "third", self.state, "os_locked", "Lock screen", self.now)
 
 
 if __name__ == "__main__":

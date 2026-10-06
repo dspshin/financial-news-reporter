@@ -12,6 +12,7 @@ SKIP_REASONS = {"not_logged_in", "reauthentication", "login_unknown",
                 "permission_unavailable", "os_locked"}
 PRESEND_PHASES = ("room_verified", "file_selected", "attachment_ready")
 UI_PHASES = PRESEND_PHASES + ("send_requested",)
+SHARE_PRESEND_PHASES = ("share_selected",)
 
 
 def read_record(path, folder, image_hash, room=None):
@@ -26,6 +27,15 @@ def read_record(path, folder, image_hash, room=None):
         status = record.get("status")
         if status not in {"sent", "pending", "uncertain", "rejected", "skipped"}:
             raise ValueError("Invalid receipt status")
+        if record.get("delivery_method") == "share":
+            from kakao_morning_state import read_share_batch
+            batch = read_share_batch(folder, path.parent)
+            if (room not in batch["rooms"] or record.get("source_room") != batch["source_room"]
+                    or record.get("ui_phase") not in {"share_selected", "send_requested"}
+                    or (status == "sent" and batch["ui_phase"] != "send_requested")):
+                raise ValueError("Invalid shared delivery receipt")
+            # A crash after the journal write must not enable another confirmation click.
+            record = dict(record, ui_phase=batch["ui_phase"])
         if status == "sent":
             if room is None:
                 if type(record.get("message_id")) is not int or record["message_id"] <= 0:
@@ -43,13 +53,16 @@ def read_record(path, folder, image_hash, room=None):
 
 def reconcile(folder, root=ROOT, now=None):
     # Import lazily: the publisher and Kakao CLI also call this module.
-    from kakao_morning_state import configured_rooms, receipt_path
+    from kakao_morning_state import (delivery_rooms, receipt_path, share_plan, direct_plan,
+                                    read_share_batch, share_receipt_path)
     now = now or datetime.now(KST)
     day = date.fromisoformat(folder.name.removesuffix("-am"))
     if folder.name != f"{day.isoformat()}-am":
         raise ValueError("Invalid morning bundle name")
     config = json.loads((root / ".kakao_morning.json").read_text(encoding="utf-8"))
-    rooms = configured_rooms(config)
+    rooms = delivery_rooms(config, day)
+    plan = share_plan(config, day)
+    direct = direct_plan(config, day)
     starts = config.get("room_start_dates", {})
     if not isinstance(starts, dict) or any(room not in rooms for room in starts):
         raise ValueError("Invalid room start dates")
@@ -63,39 +76,85 @@ def reconcile(folder, root=ROOT, now=None):
     for room in active:
         deliveries[room] = read_record(
             receipt_path(root / ".morning_kakao_delivery", folder, room), folder, image_hash, room)
+    deferred_rooms = []
+    recovery_invalid = False
+    if direct:
+        from kakao_morning_recovery import read_recovery, valid_deferral
+        try:
+            journal = read_recovery(folder, root / ".morning_kakao_delivery")
+            if any(room not in rooms for room in journal["rooms"]):
+                raise ValueError("Unconfigured recovery room")
+            for room in active:
+                if deliveries[room]["status"] not in {"sent", "skipped"} and valid_deferral(
+                        journal, room, receipt_path(root / ".morning_kakao_delivery", folder, room)):
+                    deliveries[room] = dict(deliveries[room], deferred=journal["rooms"][room]["deferred"])
+                    deferred_rooms.append(room)
+        except (OSError, ValueError, TypeError, KeyError):
+            recovery_invalid = True
+    batch = None
+    if plan and share_receipt_path(root / ".morning_kakao_delivery", folder).exists():
+        try:
+            batch = read_share_batch(folder, root / ".morning_kakao_delivery")
+            if (batch["source_room"] != plan["source_room"]
+                    or any(room not in plan["target_rooms"] for room in batch["rooms"])):
+                raise ValueError("Shared delivery plan mismatch")
+            for room in batch["rooms"]:
+                if deliveries.get(room, {}).get("status") == "not_started":
+                    deliveries[room] = {"status": "invalid", "reason": "partial_share_journal_write"}
+        except (OSError, ValueError, TypeError, KeyError):
+            batch = {"status": "invalid"}
     complete = telegram["status"] == "sent" and all(
         deliveries[room]["status"] in {"sent", "skipped"} for room in active)
-    # A later room may not have been sent after an unresolved or skipped predecessor.
+    # Legacy direct runs require success. New runs can continue after a durable
+    # deferral without pretending the earlier room was delivered.
     previous_sent = telegram["status"] == "sent"
     order_valid = True
     for room in active:
         if deliveries[room]["status"] == "sent" and not previous_sent:
             order_valid = False
-        previous_sent = previous_sent and deliveries[room]["status"] == "sent"
-    complete = complete and order_valid
+        if direct:
+            previous_sent = previous_sent and (
+                deliveries[room]["status"] in {"sent", "skipped"} or room in deferred_rooms)
+        elif not plan or room == plan["source_room"]:
+            previous_sent = previous_sent and deliveries[room]["status"] == "sent"
+    complete = complete and order_valid and not recovery_invalid and (batch or {}).get("status") != "invalid"
     next_action = "complete"
     next_target = None
-    if not order_valid:
+    if recovery_invalid:
+        next_action = "inspect_recovery_journal_no_retry"
+    elif not order_valid:
         next_action = "inspect_receipt_order"
+    elif batch and batch.get("status") == "invalid":
+        next_action = "inspect_share_journal_no_resend"
     elif not complete:
         for target, record in deliveries.items():
             status = record["status"]
-            if status in {"sent", "skipped"}:
+            if status in {"sent", "skipped"} or target in deferred_rooms:
                 continue
             next_target = target
             if target == "telegram":
                 next_action = "publish_telegram" if status == "not_started" else "inspect_telegram_no_resend"
             elif status == "pending":
-                next_action = ("inspect_ui_before_resume" if record.get("ui_phase") in PRESEND_PHASES
-                               else "inspect_ui_no_resend")
+                if record.get("delivery_method") == "share":
+                    next_action = ("inspect_shared_selection_before_resume"
+                                   if record.get("ui_phase") == "share_selected"
+                                   else "inspect_shared_delivery_no_resend")
+                else:
+                    next_action = ("inspect_ui_before_resume" if record.get("ui_phase") in PRESEND_PHASES
+                                   else "inspect_ui_no_resend")
             elif status == "not_started":
                 # If a preceding room was skipped, only an observed skip remains possible.
-                before = active[:active.index(target)]
-                next_action = ("verify_remaining_skip" if any(deliveries[r]["status"] == "skipped" for r in before)
+                before = ([plan["source_room"]] if plan and target != plan["source_room"]
+                          else active[:active.index(target)])
+                next_action = ("verify_remaining_skip" if not direct and any(deliveries[r]["status"] == "skipped" for r in before)
+                               else "share_image_to_remaining_rooms" if plan and target != plan["source_room"]
                                else "open_kakao_room")
             else:
                 next_action = "inspect_ui_no_resend"
             break
+        else:
+            if deferred_rooms:
+                next_action = "report_deferred_rooms"
     result = {"date": day.isoformat(), "edition": folder.name,
               "objective": "당일 이미지 검수와 Telegram·지정 카카오톡 대상 전송 완료",
               "stage": "delivery_completed" if complete else "delivery_incomplete",
@@ -103,6 +162,18 @@ def reconcile(folder, root=ROOT, now=None):
               "updated_at": now.isoformat(), "image_sha256": image_hash,
               "deliveries": deliveries, "next_target": next_target,
               "next_action": next_action, "order_valid": order_valid}
+    if plan:
+        result["delivery_method"] = "source_then_share"
+        result["share_source"] = plan["source_room"]
+        result["share_batch"] = batch
+    if direct:
+        result["delivery_method"] = "sequential_direct_with_continuation"
+        result["max_retries"] = direct["max_retries"]
+        result["deferred_rooms"] = deferred_rooms
+        result["all_targets_handled"] = (telegram["status"] == "sent"
+            and not recovery_invalid and order_valid and all(
+                deliveries[room]["status"] in {"sent", "skipped"} or room in deferred_rooms
+                for room in active))
     save_receipt(folder / "run-status.json", result)
     return result
 

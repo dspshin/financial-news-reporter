@@ -113,6 +113,41 @@ class DeliveryCompletionTests(unittest.TestCase):
                 delivery.main()
         self.assertEqual(error.exception.code, 2)
 
+    def shared_plan(self):
+        (self.root / ".kakao_morning.json").write_text(json.dumps({
+            "room_names": ["first", "second", "third"],
+            "share_delivery": {"effective_from": "2026-09-17", "source_room": "first",
+                               "target_rooms": ["second", "third"]}}))
+
+    def test_shared_peers_can_be_verified_independently_without_hiding_uncertain(self):
+        self.shared_plan()
+        self.put("first", "sent")
+        self.assertEqual(self.sync()["next_action"], "share_image_to_remaining_rooms")
+        self.put("second", "uncertain")
+        self.put("third", "sent")
+        state = self.sync()
+        self.assertTrue(state["order_valid"])
+        self.assertEqual(state["status"], "incomplete")
+        self.assertEqual(state["deliveries"]["third"]["status"], "sent")
+        self.put("second", "sent")
+        self.assertEqual(self.sync()["status"], "completed")
+        self.put("first", "uncertain")
+        self.assertFalse(self.sync()["order_valid"])
+
+    def test_partial_share_journal_never_schedules_another_share(self):
+        self.shared_plan()
+        self.put("first", "sent")
+        from kakao_morning_state import share_receipt_path
+        path = share_receipt_path(self.root / ".morning_kakao_delivery", self.folder)
+        path.write_text(json.dumps({"edition": self.folder.name, "image_sha256": self.image_hash,
+                                   "source_room": "first", "rooms": ["second", "third"],
+                                   "ui_phase": "send_requested", "evidence": "Selected recipients"}))
+        state = self.sync()
+        self.assertEqual(state["status"], "incomplete")
+        self.assertEqual(state["next_action"], "inspect_ui_no_resend")
+        path.write_text("broken")
+        self.assertEqual(self.sync()["next_action"], "inspect_share_journal_no_resend")
+
 
 if __name__ == "__main__":
     unittest.main()
