@@ -24,6 +24,10 @@ import xml.etree.ElementTree as ET
 from urllib.parse import quote, urlparse
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from nh_bond_parser import (
+    parse_schedule as parse_nh_schedule,
+    validation_errors as nh_bond_validation_errors,
+)
 
 # --- Holiday Check Module ---
 def check_holidays(today=None):
@@ -1922,160 +1926,14 @@ def format_nh_bond_terms(terms):
     return "/".join(terms)
 
 
-def parse_nh_syndication_text(text, reference_date, pdf_url):
-    rating_pattern = (
-        r"(?:AAA|AA[+\-0]?|A[+\-0]?|BBB[+\-0]?|BB[+\-0]?|B[+\-0]?)"
-        r"(?:\(P\))?"
-    )
-    first_row_pattern = re.compile(
-        r"^\s*(?P<issuer>\S(?:.*?\S)?)\s{2,}"
-        rf"(?P<rating>{rating_pattern})\s+"
-        r"(?P<term>\d+(?:\.\d+)?|\d+NC\d+)(?P<amount_gap>\s+)"
-        r"(?P<amount>[\d,]+|금액\s*미정)(?P<rest>.*)$"
-    )
-    continuation_pattern = re.compile(
-        r"^\s{20,}(?P<term>\d+(?:\.\d+)?)"
-        r"(?:(?P<amount_gap>\s+)(?P<amount>[\d,]+))?(?P<rest>.*)$"
-    )
-    schedule_pattern = re.compile(
-        r"(?P<demand>\d{1,2}/\d{1,2}\([^)]+\)|미정)\s+"
-        r"(?P<payment>\d{1,2}/\d{1,2}\([^)]+\))"
-    )
-    manager_name_pattern = (
-        r"(?:NH|KB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK)"
-    )
-    manager_pattern = re.compile(
-        rf"(?P<managers>{manager_name_pattern}(?:/{manager_name_pattern})*)"
-    )
-    parsed_rows = []
-    current = None
-
-    for line in (text or "").splitlines():
-        first_match = first_row_pattern.match(line)
-        if first_match:
-            rest = first_match.group("rest")
-            schedule_match = schedule_pattern.search(rest)
-            manager_match = manager_pattern.search(rest)
-            amount_area = rest[:manager_match.start()] if manager_match else ""
-            amount_is_in_expected_column = len(first_match.group("amount_gap")) <= 20
-            if not amount_is_in_expected_column:
-                amount_area = first_match.group("amount") + " " + amount_area
-            amount_candidates = [
-                int(value.replace(",", ""))
-                for value in re.findall(r"\d[\d,]*", amount_area)
-            ]
-            band_match = re.search(
-                r"(?:(?P<label>개별|등급)\s+)?"
-                r"(?P<lower>-?\d+(?:\.\d+)?)\s*~\s*"
-                r"(?P<upper>\+?\d+(?:\.\d+)?)",
-                rest,
-            )
-            first_amount_text = normalize_whitespace(first_match.group("amount"))
-            first_amount = (
-                int(first_amount_text.replace(",", ""))
-                if (
-                    amount_is_in_expected_column
-                    and re.fullmatch(r"[\d,]+", first_amount_text)
-                )
-                else None
-            )
-            current = {
-                "issuer": normalize_whitespace(first_match.group("issuer")),
-                "rating": first_match.group("rating"),
-                "terms": [first_match.group("term")],
-                "amounts": [first_amount],
-                "raw_max_amount": (
-                    None
-                    if "증액없음" in amount_area
-                    else amount_candidates[-1] if amount_candidates else None
-                ),
-                "managers": (
-                    manager_match.group("managers").split("/")
-                    if manager_match else []
-                ),
-                "demand_text": (
-                    schedule_match.group("demand") if schedule_match else None
-                ),
-                "payment_text": (
-                    schedule_match.group("payment") if schedule_match else None
-                ),
-                "rate_band": (
-                    (
-                        (f"{band_match.group('label')} " if band_match.group("label") else "")
-                        + f"{band_match.group('lower')}~{band_match.group('upper')}bp"
-                    )
-                    if band_match else "고정" if "고정" in rest else None
-                ),
-            }
-            parsed_rows.append(current)
-            continue
-
-        continuation_match = continuation_pattern.match(line)
-        if continuation_match and current:
-            current["terms"].append(continuation_match.group("term"))
-            continuation_amount = continuation_match.group("amount")
-            amount_gap = continuation_match.group("amount_gap") or ""
-            current["amounts"].append(
-                int(continuation_amount.replace(",", ""))
-                if continuation_amount and len(amount_gap) <= 20
-                else None
-            )
-
-    events = []
-    for row in parsed_rows:
-        if not row["demand_text"]:
-            continue
-        demand_date = (
-            None
-            if row["demand_text"] == "미정"
-            else parse_month_day(row["demand_text"], reference_date)
-        )
-        payment_date = parse_month_day(row["payment_text"], reference_date)
-        if (row["demand_text"] != "미정" and not demand_date) or not payment_date:
-            continue
-
-        tranches = [
-            {"term": term, "amount_eok": amount}
-            for term, amount in zip(row["terms"], row["amounts"])
-        ]
-        known_amounts = [
-            amount for amount in row["amounts"] if amount is not None
-        ]
-        amount_eok = float(sum(known_amounts)) if known_amounts else None
-        max_amount_eok = row["raw_max_amount"]
-        if (
-            max_amount_eok is not None
-            and amount_eok is not None
-            and max_amount_eok <= amount_eok
-        ):
-            max_amount_eok = None
-
-        events.append({
-            "source": "nh_pdf",
-            "issuer": row["issuer"],
-            "rating": row["rating"],
-            "term": format_nh_bond_terms(row["terms"]),
-            "tranches": tranches,
-            "managers": row["managers"],
-            "security_type": None,
-            "amount_eok": amount_eok,
-            "max_amount_eok": max_amount_eok,
-            "demand_date": demand_date,
-            "demand_date_text": row["demand_text"],
-            "payment_date": payment_date,
-            "start_time": None,
-            "end_time": None,
-            "rate_band": row["rate_band"],
-            "report_url": pdf_url,
-        })
-
-    return events
+def parse_nh_syndication_text(text, reference_date, pdf_url, diagnostics=None):
+    return parse_nh_schedule(text, reference_date, pdf_url, diagnostics)
 
 
 def extract_nh_syndication_pdf(pdf_content):
     reader = PdfReader(BytesIO(pdf_content))
-    text = "\n".join(
-        page.extract_text(extraction_mode="layout") or ""
+    text = "\n\f\n".join(
+        page.extract_text(extraction_mode="layout", layout_mode_space_vertically=False) or ""
         for page in reader.pages
     )
     created_at = None
@@ -2121,11 +1979,19 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 raise ValueError("response is not a PDF")
 
             pdf_text, created_at = extract_nh_syndication_pdf(response.content)
+            validation_issues = []
             events = parse_nh_syndication_text(
                 pdf_text,
                 reference_date=reference_date,
                 pdf_url=pdf_url,
+                diagnostics=validation_issues,
             )
+            for issue in validation_issues[:8]:
+                logging.warning(
+                    "   [Bond Market] NH row rejected (%s): %s",
+                    issue.get("issuer", "unknown"),
+                    "; ".join(issue.get("errors", [])),
+                )
             planned_end_date = reference_date + timedelta(days=planned_lookahead_days)
             events = [
                 event
@@ -2140,7 +2006,11 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 )
             ]
             result.update({
-                "status": "stale" if offset else ("ok" if events else "empty"),
+                "status": (
+                    "stale" if offset else "partial" if validation_issues
+                    else "ok" if events else "empty"
+                ),
+                "validation_errors": validation_issues,
                 "items": sorted(
                     events,
                     key=lambda item: (
@@ -2496,6 +2366,8 @@ def bond_sources_ready(kofia_result, nh_result, reference_date):
     nh_ready = (
         nh_result.get("source_date") == reference_date
         and nh_result.get("status") in {"ok", "empty"}
+        and not nh_result.get("validation_errors")
+        and all(nh_bond_event_reliable(event) for event in nh_result.get("items", []))
     )
     return kofia_ready and nh_ready
 
@@ -2595,9 +2467,15 @@ def normalize_bond_issuer_key(issuer):
     return re.sub(r"[^0-9A-Za-z가-힣]", "", normalized).lower()
 
 
+def nh_bond_event_reliable(event):
+    return not nh_bond_validation_errors(event)
+
+
 def merge_bond_demand_events(dart_items, nh_items):
     merged = {}
     for event in nh_items or []:
+        if not nh_bond_event_reliable(event):
+            continue
         demand_date = event.get("demand_date")
         issuer_key = normalize_bond_issuer_key(event.get("issuer", ""))
         if not issuer_key or not demand_date:
@@ -2713,7 +2591,7 @@ def commit_bond_history_after_delivery(
         schedule_digest
         and schedule_digest.get("next_history")
     )
-    if not pending_history:
+    if not pending_history or schedule_digest.get("reliable") is False:
         return False
     if delivery_configured and delivery_complete:
         return (saver or save_bond_history)(pending_history)
@@ -2849,6 +2727,11 @@ def describe_bond_event_changes(previous, current):
         previous.get("tranches") != current.get("tranches")
         and previous.get("term") == current.get("term")
         and previous.get("amount_eok") == current.get("amount_eok")
+        and previous.get("tranches") and current.get("tranches")
+        and all(
+            tranche.get("amount_eok") is not None
+            for tranche in previous["tranches"] + current["tranches"]
+        )
     ):
         changes.append(
             "만기별 금액 "
@@ -2885,7 +2768,7 @@ def collect_bond_schedule_candidates(bond_market_data, reference_date):
     undated_events = [
         event
         for event in nh_result.get("items", [])
-        if not event.get("demand_date")
+        if nh_bond_event_reliable(event) and not event.get("demand_date")
     ]
     nh_led_future_events = [
         event
@@ -2940,6 +2823,8 @@ def bond_schedule_snapshot_reliable(bond_market_data, reference_date):
     return (
         source_date == reference_date
         and nh_result.get("status") in {"ok", "empty"}
+        and not nh_result.get("validation_errors")
+        and all(nh_bond_event_reliable(event) for event in nh_result.get("items", []))
     )
 
 
@@ -2966,7 +2851,7 @@ def prepare_bond_schedule_digest(
     )
     if not reliable:
         logging.warning(
-            "   [Bond History] Current NH snapshot is unavailable or stale; "
+            "   [Bond History] Current NH snapshot is unavailable, stale or invalid; "
             "comparison and history update skipped."
         )
         return {
@@ -3030,7 +2915,7 @@ def prepare_bond_schedule_digest(
                 "event": event,
                 "changes": changes,
             })
-        elif previous_record.get("fingerprint") != fingerprint:
+        elif changes:
             digest["changed_events"].append({
                 "event": event,
                 "changes": changes,
@@ -3127,8 +3012,8 @@ def format_tranche_amounts(event):
     tranches = event.get("tranches") or []
     tranche_texts = []
     has_complete_tranche_amounts = (
-        len(tranches) == 1
-        or all(tranche.get("amount_eok") is not None for tranche in tranches)
+        bool(tranches)
+        and all(tranche.get("amount_eok") is not None for tranche in tranches)
     )
     if has_complete_tranche_amounts:
         for tranche in tranches:
@@ -3306,6 +3191,12 @@ def build_bond_market_section(
         )
     elif nh_result.get("status") in {"error", "unavailable"}:
         lines.append("※ NH 당일 예정표를 확인하지 못함")
+    if (
+        nh_result.get("status") == "partial"
+        or nh_result.get("validation_errors")
+        or any(not nh_bond_event_reliable(event) for event in nh_result.get("items", []))
+    ):
+        lines.append("※ NH 예정표 일부 조건 검증 실패: 해당 종목 상세 제외, 조건 비교·이력 갱신 보류")
 
     max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
     digest_reliable = schedule_digest and schedule_digest.get("reliable")

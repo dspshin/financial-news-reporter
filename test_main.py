@@ -1416,14 +1416,16 @@ class BondMarketTests(unittest.TestCase):
                                         2        1,500                                                                                                       개별   -30~+30                                /
                                         3                                                                                                                    개별   -30~+30                                /
 """
+        diagnostics = []
         events = main.parse_nh_syndication_text(
             pdf_text,
             reference_date=date(2026, 7, 24),
             pdf_url="https://example.com/nh.pdf",
+            diagnostics=diagnostics,
         )
 
-        self.assertEqual(len(events), 4)
-        hana, meritz, kyobo, woori = events
+        self.assertEqual(len(events), 3)
+        hana, meritz, kyobo = events
         self.assertEqual(hana["issuer"], "하나에프앤아이")
         self.assertEqual(hana["term"], "1.5/2/3년")
         self.assertEqual(hana["amount_eok"], 1500)
@@ -1447,13 +1449,10 @@ class BondMarketTests(unittest.TestCase):
         self.assertIsNone(kyobo["demand_date"])
         self.assertEqual(kyobo["payment_date"], date(2026, 8, 31))
         self.assertEqual(kyobo["rate_band"], "고정")
-        self.assertEqual(woori["term"], "1.5/2/3년")
-        self.assertEqual(woori["amount_eok"], 1500)
-        self.assertEqual(woori["max_amount_eok"], 2500)
-        self.assertEqual(
-            main.format_tranche_amounts(woori),
-            "1.5/2/3년 1,500억원 (최대 2,500억원)",
-        )
+        # No header/explicit total: summing just the known 2-year allocation
+        # would invent a complete issuance amount for three tenors.
+        self.assertEqual(diagnostics[0]["issuer"], "우리금융에프앤아이")
+        self.assertIn("amount outside inferred column", diagnostics[0]["errors"])
 
     @patch.dict(
         "os.environ",
@@ -1500,8 +1499,11 @@ class BondMarketTests(unittest.TestCase):
             "source": "nh_pdf",
             "issuer": "하나에프앤아이",
             "demand_date": date(2026, 7, 27),
+            "term": "2년",
+            "tranches": [{"term": "2", "amount_eok": 1400}],
             "amount_eok": 1400,
             "max_amount_eok": 3000,
+            "payment_date": date(2026, 8, 4),
             "report_url": "https://nh.example/list.pdf",
         }
 
