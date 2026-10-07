@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "date": "2026-10-07",
+  "cutoff": "2026-10-07T07:35:00+09:00",
+  "market_day": {
+    "date": "2026-10-07",
+    "status": "open",
+    "checked_at": "2026-10-07T07:33:34+09:00",
+    "sources": [
+      "https://open.krx.co.kr/contents/MKD/01/0110/01100305/MKD01100305.jsp"
+    ],
+    "evidence": "Chrome KRX 공식 휴장일 화면: 검색시작년도 2026 / 한국거래소 선택 후 조회. 2026-10-05 개천절 대체휴일, 2026-10-09 한글날만 10월 휴장 목록에 표시되고 2026-10-07 없음. 평일 수요일 개장 대상."
+  },
+  "checked_at": "2026-10-07T07:56:35.191449+09:00",
+  "sha256": {
+    "briefing.png": "2352c05f0c230a66decb02167f197cae788bca7715703ddb5b75766380066704",
+    "manuscript.txt": "b9bb2c659681d3daadd3537311adda18b86a791d5b431066fb16610e2c9c67d9",
+    "sources.md": "61cb1f3f1369dcaeeafb02a1211a8c4e98b7095eaf816bb1d37840defaf92779",
+    "caption.txt": "72355da0ee29fcc5d07360dd5e7e0ecd7c833fe09a56ef68c7a157da304f83e6"
+  },
+  "visual_checks": {
+    "date_weekday": true,
+    "numeric_rows_signs_arrows": true,
+    "futures_contract_session_comparison": true,
+    "fx_types_times_yen": true,
+    "event_kst_watch_points": true,
+    "six_panels_summary": true,
+    "female_analyst_and_relevant_illustrations": true,
+    "no_fictional_charts_or_extra_slogan": true,
+    "exact_channel_footer": true
+  },
+  "repair": "Removed unapproved top-right slogan and fictional decorative charts with built-in imagegen. All verified numerical rows preserved."
+}

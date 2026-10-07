@@ -1,0 +1,203 @@
+{
+  "date": "2026-10-07",
+  "cutoff": "2026-10-07T07:35:00+09:00",
+  "retrieval_interval_kst": [
+    "2026-10-07T07:33:34+09:00",
+    "2026-10-07T07:53:00+09:00"
+  ],
+  "sources_document": "sources.md",
+  "items": [
+    {
+      "item": "KOSPI200_night",
+      "status": "verified",
+      "source": "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd?menuId=MDC0201050103",
+      "queried_at_kst": "2026-10-07T07:37:21+09:00",
+      "comparison_queried_at_kst": "2026-10-07T07:40:59+09:00",
+      "filters": {
+        "product": "코스피200 선물",
+        "market": "야간",
+        "period": "20260930~20261007"
+      },
+      "contract": "2026-12",
+      "code": "A016C000",
+      "exchange_trade_date": "2026-10-07",
+      "session_start": "2026-10-06T18:00:00+09:00",
+      "session_end": "2026-10-07T06:00:00+09:00",
+      "close": 1091.25,
+      "previous_regular_close": 1103,
+      "comparison_date": "2026-10-06",
+      "change_percent": -1.07,
+      "unit": "pt",
+      "delay_minutes": 20,
+      "formula": "(1091.25/1103-1)*100",
+      "fallback_used": false
+    },
+    {
+      "item": "WTI",
+      "status": "verified_via_news",
+      "primary_source": "https://www.cmegroup.com/markets/energy/crude-oil/light-sweet-crude.settlements.html",
+      "primary_result": "latest available settlement table trade date Oct5; Oct6 row unavailable",
+      "contract": "2026-11",
+      "code": "CLX6",
+      "trade_date": "2026-10-06",
+      "price_kind": "daily settlement",
+      "value": 89.44,
+      "unit": "USD/barrel",
+      "previous_settle": 89.43,
+      "change_percent": 0.01,
+      "formula": "(89.44/89.43-1)*100",
+      "fallback_sources": [
+        "https://ca.finance.yahoo.com/news/tsx-closer-index-gains-utilities-202134319.html",
+        "https://www.fnnews.com/news/202610070529170392"
+      ],
+      "fallback_publication_kst": [
+        "2026-10-07T05:21:00+09:00",
+        "2026-10-07T05:32:00+09:00"
+      ],
+      "retrieval_note": "MT public indexed excerpt explicitly November settle; browser premium article not bypassed. FN full body explicitly November close. CME previous identical contract settle crosscheck.",
+      "observation_minute_from_article": null
+    },
+    {
+      "item": "Treasury_CMT",
+      "status": "verified",
+      "source": "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/TextView?field_tdr_date_value=2026&type=daily_treasury_yield_curve",
+      "observation_date": "2026-10-06",
+      "price_kind": "nominal CMT/par yield reference, around 15:30 NY",
+      "publication_minute": null,
+      "two_year": 4.79,
+      "ten_year": 5.27,
+      "previous_date": "2026-10-05",
+      "previous_two_year": 4.84,
+      "previous_ten_year": 5.31,
+      "change_bp": [
+        -5,
+        -4
+      ],
+      "unit": "%",
+      "formula": "(current[%]-prior[%])*100 bp"
+    },
+    {
+      "item": "NDF",
+      "status": "verified",
+      "source": "https://ksureapi.einfomax.co.kr/v2/datafeed/ksure/fxview?id=20261007062220072&",
+      "new_york_date": "2026-10-06",
+      "tenor": "1 month",
+      "price_kind": "final MID quote",
+      "value": 1337.3,
+      "bid": 1337.1,
+      "ask": 1337.5,
+      "swap": -0.95,
+      "spot_adjusted": 1338.25,
+      "publication_kst": "2026-10-07T06:22:19+09:00",
+      "observation_minute": null,
+      "unit": "KRW/USD",
+      "comparison_change_not_rendered": true
+    },
+    {
+      "item": "USD_KRW",
+      "status": "verified",
+      "source": "https://ksureapi.einfomax.co.kr/v2/datafeed/ksure/fxview?id=20261007060102638&",
+      "price_kind": "Seoul night close",
+      "observed_at": "2026-10-07T06:00:00+09:00",
+      "publication_kst": "2026-10-07T06:01:02+09:00",
+      "value": 1338.1,
+      "unit": "KRW/USD",
+      "retrieved_at_precision": "2026-10-07 07:50 KST"
+    },
+    {
+      "item": "JPY_KRW",
+      "status": "verified_previous_fix",
+      "source": "https://hanabank.com/cms/rate/index.do?contentUrl=/cms/rate/wpfxd651_01i.do",
+      "value": 847.43,
+      "unit": "KRW/100JPY",
+      "price_kind": "bank base rate",
+      "observed_at": "2026-10-06T21:04:00+09:00",
+      "fixing_number": 874,
+      "queried_at_kst": "2026-10-07T07:44:06+09:00",
+      "reason": "bank first today fixing not yet posted; date Oct7 query returns preceding business day by explicit bank note"
+    },
+    {
+      "item": "EWY",
+      "status": "verified",
+      "source": "https://finance.yahoo.com/quote/EWY/history/",
+      "trade_date": "2026-10-06",
+      "price_kind": "NYSE Arca regular close",
+      "value": 186.4,
+      "previous_close": 191.46,
+      "previous_date": "2026-10-05",
+      "unit": "USD",
+      "change_percent": -2.64,
+      "issuer_source": "https://www.ishares.com/us/products/239681/ishares-msci-south-korea-capped-etf",
+      "issuer_result": "Oct5 market price191.46 only, not today's close; NAV191.65 not used"
+    },
+    {
+      "item": "US_indices",
+      "status": "verified",
+      "regular_trade_date": "2026-10-06",
+      "comparison": "previous regular close Oct5",
+      "values": {
+        "Dow": [
+          51521.28,
+          0.49
+        ],
+        "SP500": [
+          7818.93,
+          0.58
+        ],
+        "Nasdaq": [
+          27599.79,
+          0.45
+        ],
+        "Russell2000": [
+          2830.3,
+          -0.59
+        ],
+        "SOX": [
+          13217.82,
+          0.34
+        ]
+      },
+      "sources": [
+        "https://apnews.com/article/267ca73e15e09f7e8deb5f6076405f48",
+        "https://www.fnnews.com/news/202610070525261635",
+        "https://beta.indexes.nasdaq.com/Index/Overview/COMP",
+        "https://beta.indexes.nasdaq.com/Index/History/SOX",
+        "https://fred.stlouisfed.org/series/NASDAQSOX"
+      ],
+      "anomalies": [
+        "Yahoo Nasdaq header0.10 discrepancy resolved by Nasdaq official same-date27599.79 + AP/FN",
+        "SOX beta dynamic history dates one-day early; header correctOct6; prior from dated FRED Oct5 used for rate"
+      ]
+    },
+    {
+      "item": "news_and_schedule",
+      "status": "verified",
+      "sources": [
+        "https://www.constellationenergy.com/news/2026/10/google-and-constellation-announce-landmark-agreement-to-bring-890-mw-of-new-nuclear-capacity-to-pjm-grid.html",
+        "https://blog.google/company-news/why-were-backing-americas-existing-nuclear-plants/",
+        "https://www.aol.ca/articles/far-presidential-frontrunner-le-pen-040622000.html",
+        "https://www.federalreserve.gov/newsevents/2026-october.htm",
+        "https://www.eia.gov/petroleum/supply/weekly/schedule.php"
+      ],
+      "schedule_kst": [
+        "2026-10-08T03:00:00+09:00",
+        "2026-10-07T23:30:00+09:00"
+      ],
+      "details": "facts and interpretation separated; no pre-release actual data or forecast guarantees"
+    }
+  ],
+  "failed_paths": [
+    {
+      "source": "Yahoo public finance query API",
+      "result": "Python CA validation failure; secure curl HTTP429, no quote values adopted"
+    },
+    {
+      "source": "web open FN/K-SURE",
+      "result": "Internal Error; Chrome source bodies used"
+    },
+    {
+      "source": "guessed Reuters current oil URL",
+      "result": "one direct failure; no guessed URL loop; Reuters reprint + FN + MT used"
+    }
+  ]
+}

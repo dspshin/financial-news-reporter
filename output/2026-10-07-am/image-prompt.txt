@@ -1,0 +1,82 @@
+Use case: infographic-diagram. Create ONE finished, square, high-resolution Korean financial morning briefing infographic, ideally 2048x2048. Opaque white paper with lively black pen sketchnote drawings, elegant sky-blue hand-drawn title backgrounds, subtle pastel highlights, professionally legible Korean typography. This is an actual dated data-rich publication: accuracy and legibility outrank decoration.
+
+Composition: top header occupies 14%, six numbered panels in a clear 3 columns × 2 rows grid occupy 72%, three-line summary and footer occupy 14%. All six panels have balanced width, no tall irregular panels. Generous white margins, crisp large body letters, bold large numeric rows. Handwriting feel in titles; clean readable Korean body. No fabricated chart. No watermark or signature. No extra slogan/claim. Render EVERY line in the verbatim copy below and no new claims. Use line wrapping tastefully, retain all numerical metadata. Do not make body too small. Price increases: red numbers and upward arrows; decreases: green numbers/down arrows; no-change gray. Interest rate declines −5bp/−4bp green; neutral FX values black since no directional comparison is displayed. Keep + and − signs, decimals, commas, contract dates/times exact.
+
+Illustrations: top RIGHT a mature professional female financial analyst, natural adult proportions, tidy short bob, navy jacket, ivory blouse, calm thoughtful expression, holding a tablet. Not childish chibi. Top LEFT a small coherent illustration bundle of nuclear power infrastructure plus a semiconductor chip, linked to summary #1 power interest and summary #2 chip differentiation; a small magnifying glass connects to summary #3 watching flows. These mappings are planning notes, NOT text to render. No fixed US/Korean flags.
+Panel ② should have a small neutral recognizable pen portrait of Marine Le Pen (French female political figure, blonde short hair), name simply '르펜' next to portrait; her illustration refers only to her actual fiscal pledge. Do not depict a meeting or fabricated speech. Add a modest reactor/electricity drawing associated with Google's power contract. Panel ③ small oil barrel/tanker plus bond certificate near margin. Panel ④ small electric grid and chip, Panel ⑤ small Korean-market numeric card/magnifier, Panel ⑥ small dollar/yen banknotes and a calendar. Make ②,③,④ illustrations more visible, others small. Pale backgrounds stay away from all letters and numbers. Use warm editorial drawing style, refined line work and pastel watercolor accents, eye-catching but text-focused.
+
+Bottom exact channel URL: single line centered at the VERY bottom with clear margin, must not wrap or alter underscores. It is https://t.me/morning_financial_news_channel
+
+VERBATIM COPY TO RENDER:
+10/7(수) 아침 시황
+미 대형주는 신고가, 한국 관련 신호는 약세…전력 강세와 반도체 차별화.
+
+① 미국 증시
+다우 51,521.28  +0.49% ↑
+S&P500 7,818.93  +0.58% ↑
+나스닥 27,599.79  +0.45% ↑
+러셀2000 2,830.30  −0.59% ↓
+필라델피아 반도체 13,217.82  +0.34% ↑
+미국 10/6 정규장 종가·직전 정규장 대비
+대형주 상승, 소형주와 반도체 내부는 온도 차.
+
+② 주요 이슈
+구글·콘스텔레이션: 20년 원전 전력 계약·890MW 증설
+→ AI 전력 투자가 발전설비 수요로 연결(해석).
+르펜, 프랑스 재정절감 공약 제시
+→ 재정 불안 완화·유로 반등에 영향(시장 해석).
+유가, 장중 하락 후 낙폭 반납
+→ 중동 공급 위험은 여전히 변수(해석).
+
+③ 유가·금리
+WTI 11월물(CLX6) $89.44  +0.01% ↑
+NYMEX 10/6 결제·같은 월물 직전 결제 대비
+미 국채 2년 4.79%  −5bp
+미 국채 10년 5.27%  −4bp
+미 재무부 CMT·10/6 기준·직전 관측 대비
+금리 하락은 부담 완화, 유가 공급 위험은 잔존(해석).
+
+④ 주도 업종·종목
+콘스텔레이션(CEG) +12.25% ↑ · 구글 전력 계약
+엔비디아(NVDA) +0.14% ↑ · 4거래일 연속 최고가
+알파벳 +0.35% ↑ · 원전 전력 확보
+인텔(INTC) −3.18% ↓ · 반도체 일부 약세
+마이크론(MU) −1.73% ↓ · 메모리주 약세
+미국 10/6 정규장·직전 종가 대비
+발전·전력 강세. 인텔·마이크론의 개별 하락 원인은 미확인.
+
+⑤ 한국장 사전 신호
+KOSPI200 2026-12월물 1,091.25  −1.07% ↓
+10/6 18:00~10/7 06:00 KST 야간 종가
+직전 주간 동일 월물 1,103.00 대비
+EWY(미국 상장 한국 ETF) $186.40  −2.64% ↓
+미국 10/6 정규장 종가·직전 종가 대비
+해석: AI 전력 투자 → 국내 전력기기·원전 업종 관심.
+개장 후 외국인 선물 수급·반도체 반응 확인.
+
+⑥ 환율·일정
+달러/원 1,338.10원 · 서울 야간 10/7 06:00 종가
+NDF 1개월 MID 1,337.30원 · 뉴욕 10/6 최종 호가
+엔화(100엔) 847.43원 · 하나 매매기준율 10/6 21:04 KST
+10/8 03:00 KST / 9월 FOMC 의사록 / 금리 경로·물가 판단
+10/7 23:30 KST / EIA 주간 원유재고 / 재고·수요 변화
+
+3줄 요약
+1. 밤사이 핵심 변화: 대형주 신고가 속 원전·전력으로 관심 확대.
+2. 한국장 연결: 해외 한국 ETF·야간선물 약세, 업종별 반응 확인.
+3. 판단이 달라질 조건: 원화와 외국인 선물 수급이 안정되는지 확인.
+
+다음에 확인할 변수
+09:00~09:30 KST 외국인 선물·달러/원·전력기기와 반도체 상대 흐름
+
+기준: 2026-10-07 07:35 KST
+KRX 시세 20분 지연 / 엔화는 직전 고시 / NDF 분 단위 시각 미제공
+https://t.me/morning_financial_news_channel
+
+
+VISUAL QA REPAIR:
+Edit this exact financial infographic while preserving the full layout, all Korean text from the approved manuscript, all prices, dates, signs, arrows used next to numerical price changes, and the mature female analyst. Make ONLY these corrections:
+1) Remove the unauthorized handwritten slogan at the extreme top right ("시장을, 더 넓게, 더 깊게.") completely; leave this area blank white/pale blue.
+2) Remove EVERY decorative chart without data: the blue rising line/bar graph behind the analyst (top right skyline), the blue rising chart next to the US flag in panel ①, the blue bar chart INSIDE the top-left magnifying glass, and the red/green candlestick charts behind/inside the magnifier in panel ⑤. Replace chart areas with pale neutral buildings or an unmarked neutral market document; replace the magnifier interior with a clean neutral semiconductor circuit/paper with NO plotted price lines, NO bars, NO candlesticks, NO numbers. This publication has no real time-series dataset and must not contain fictional charts.
+Keep all legitimate standalone direction arrows attached to verified +0.49%, +0.58%, +0.45%, −0.59%, +0.34%, +0.01%, five stock percentages, −1.07%, −2.64% exactly unchanged. Keep oil, reactor, powerline, currency, calendar illustrations, Marine Le Pen portrait/name, analyst, all six numbered panels and summary. Keep the footer URL EXACTLY https://t.me/morning_financial_news_channel in one line at the very bottom. Do not add any new words, decorative slogan or numerical data. Preserve sharp legibility and high square resolution.
+https://t.me/morning_financial_news_channel
