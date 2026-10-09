@@ -215,7 +215,8 @@ class NhBondParserTests(unittest.TestCase):
         saver.assert_not_called()
         section = main.build_bond_market_section(data, schedule_digest=digest)
         self.assertNotIn("700/", section)
-        self.assertNotIn("LS증권", section)
+        self.assertIn("LS증권", section)
+        self.assertIn("조건 확인 중", section)
         self.assertNotIn("→", section)
 
     def test_dart_merge_cannot_hide_bad_nh_from_history_guard(self):
@@ -228,7 +229,8 @@ class NhBondParserTests(unittest.TestCase):
         dart["source"] = "dart"
         data["dart"] = {"status": "ok", "items": [dart]}
         merged = main.merge_bond_demand_events([dart], [bad])
-        self.assertEqual(merged[0]["tranches"], dart["tranches"])
+        self.assertTrue(main.bond_event_validation_errors(merged[0]))
+        self.assertEqual(main.format_tranche_amounts(merged[0]), "조건 확인 중")
         self.assertFalse(main.bond_schedule_snapshot_reliable(data, self.reference))
 
     def test_valid_amount_change_still_emits_condition_change(self):
@@ -314,6 +316,202 @@ class NhBondParserTests(unittest.TestCase):
         self.assertIn("\n\f\n", text)
         self.assertIsNone(created)
         pages[0].extract_text.assert_called_once_with(extraction_mode="layout", layout_mode_space_vertically=False)
+
+
+class BondMergeSafetyTests(unittest.TestCase):
+    """Synthetic input objects using the two amounts verified in NH's 10/8 XLSX.
+
+    These are not the original PDF extraction or the GP execution's input cache.
+    """
+    reference = date(2026, 10, 8)
+
+    def lotte(self):
+        return {
+            "source": "nh_pdf", "issuer": "롯데리츠", "rating": "AA-",
+            "term": "1/2년", "amount_eok": 1250, "max_amount_eok": None,
+            "amount_basis": "tranche_sum", "reported_total_eok": 1250,
+            "tranches": [{"term": "1", "amount_eok": 500},
+                         {"term": "2", "amount_eok": 750}],
+            "demand_date": self.reference, "payment_date": date(2026, 10, 16),
+            "managers": ["NH", "KB"], "report_url": "https://example.com/nh.pdf",
+        }
+
+    def dart(self, **changes):
+        event = self.lotte()
+        for field in ("tranches", "amount_basis", "reported_total_eok", "managers"):
+            event.pop(field)
+        event.update(source="dart", end_time="16:00", report_url="https://example.com/dart")
+        event.update(changes)
+        return event
+
+    def data(self, dart, nh=None, **nh_changes):
+        nh_result = {"status": "ok", "source_date": self.reference,
+                     "items": [self.lotte()] if nh is None else nh}
+        nh_result.update(nh_changes)
+        return {"reference_date": self.reference, "enabled": True,
+                "dart": {"status": "ok", "items": [dart]}, "nh": nh_result,
+                "kofia": {"status": "empty", "categories": {}}}
+
+    def assert_pending(self, data):
+        baseline = main.prepare_bond_schedule_digest(
+            self.data(self.dart()), main.build_bond_history_state(), self.reference)
+        history = baseline["next_history"]
+        before = copy.deepcopy(history)
+        digest = main.prepare_bond_schedule_digest(data, history, self.reference)
+        self.assertFalse(digest["reliable"])
+        self.assertIsNone(digest["next_history"])
+        self.assertEqual(history, before)
+        saver = Mock()
+        self.assertFalse(main.commit_bond_history_after_delivery(digest, True, True, saver))
+        saver.assert_not_called()
+        for supplied_digest in (None, digest):
+            section = main.build_bond_market_section(data, schedule_digest=supplied_digest)
+            self.assertIn("롯데리츠", section)
+            self.assertIn("조건 확인 중", section)
+            self.assertNotIn("억원", section)
+            self.assertNotIn("→", section)
+            self.assertNotIn("[변경]", section)
+
+    def test_matching_aggregate_uses_both_nh_tranches_and_same_history(self):
+        data = self.data(self.dart())
+        before = copy.deepcopy(data)
+        merged, = main.merge_bond_demand_events(data["dart"]["items"], data["nh"]["items"])
+        self.assertEqual(main.bond_event_validation_errors(merged), [])
+        self.assertEqual(main.format_tranche_amounts(merged), "1년 500억원 / 2년 750억원")
+        self.assertIn("1/2년 1,250억원", main.format_nh_mail_schedule_line(merged))
+        digest = main.prepare_bond_schedule_digest(data, main.build_bond_history_state(), self.reference)
+        record = next(iter(digest["next_history"]["events"].values()))
+        self.assertEqual(record["event"], main.snapshot_bond_event(merged))
+        section = main.build_bond_market_section(data, schedule_digest=digest)
+        self.assertIn("1년 500억원 / 2년 750억원", section)
+        self.assertEqual(data, before)
+
+    def test_partial_dart_allocation_cannot_erase_complete_nh_bundle(self):
+        data = self.data(self.dart(tranches=[{"term": "1", "amount_eok": 500}]))
+        event, = main.merge_bond_demand_events(data["dart"]["items"], data["nh"]["items"])
+        self.assertEqual(main.bond_event_validation_errors(event), [])
+        self.assertEqual(event["tranches"], self.lotte()["tranches"])
+        self.assertIn("2년 750억원", main.format_tranche_amounts(event))
+
+    def test_gp_oct8_aggregate_and_first_nh_tranche_cannot_mix(self):
+        # Recreates the observed schedule/detail mismatch with synthetic inputs;
+        # the actual PDF extraction and execution cache have not been recovered.
+        nh = self.lotte()
+        nh.update(term="1년", amount_eok=500, reported_total_eok=500,
+                  tranches=[{"term": "1", "amount_eok": 500}])
+        self.assert_pending(self.data(self.dart(), nh=[nh], status="partial",
+            validation_errors=[{"issuer": "unknown", "errors": ["unrecognized row"]}]))
+
+    def test_partial_dart_conditions_with_unknown_total_can_use_matching_nh(self):
+        data = self.data(self.dart(term=None, amount_eok=None,
+                                  tranches=[{"term": "1", "amount_eok": 500}]))
+        event, = main.merge_bond_demand_events(data["dart"]["items"], data["nh"]["items"])
+        self.assertEqual(main.bond_event_validation_errors(event), [])
+        self.assertEqual(event["amount_eok"], 1250)
+
+    def test_known_source_conflicts_never_alert_or_overwrite_history(self):
+        for changes in (
+            {"term": "1년", "amount_eok": 500},
+            {"amount_eok": 1400}, {"term": "1/3년"},
+            {"payment_date": date(2026, 10, 17)},
+            {"tranches": [{"term": "1", "amount_eok": 600}]},
+            {"reported_total_eok": 500}, {"max_amount_eok": 1000},
+            {"series": "11"},
+        ):
+            with self.subTest(changes=changes):
+                nh = self.lotte()
+                nh["series"] = "10"
+                self.assert_pending(self.data(self.dart(**changes), nh=[nh]))
+
+    def test_dart_only_partial_detail_cannot_bypass_any_formatter(self):
+        bad = self.dart(tranches=[{"term": "1", "amount_eok": 500}])
+        self.assert_pending(self.data(bad, nh=[]))
+        self.assertEqual(main.format_tranche_amounts(bad), "조건 확인 중")
+        self.assertNotIn("억원", main.format_nh_mail_schedule_line(bad))
+        detail = "\n".join(main.format_nh_mail_detail(bad, "변경", ["금액 500 → 1250"]))
+        self.assertNotIn("변경", detail)
+        self.assertNotIn("→", detail)
+        # Even an injected reliable digest must use the same detail guard.
+        section = main.build_bond_market_section(self.data(bad, nh=[]), schedule_digest={
+            "reliable": True, "changed_events": [{"event": bad, "changes": ["500 → 1250"]}]})
+        self.assertIn("조건 확인 중", section)
+        self.assertNotIn("억원", section)
+        self.assertNotIn("→", section)
+
+    def test_rejected_nh_issuer_cannot_reappear_as_dart_details(self):
+        self.assert_pending(self.data(self.dart(), nh=[], status="partial",
+            validation_errors=[{"issuer": "롯데리츠(담보부)", "errors": ["missing second tenor"]}]))
+
+    def test_demand_dates_conflict_for_same_payment_is_quarantined(self):
+        self.assert_pending(self.data(self.dart(demand_date=date(2026, 10, 9))))
+
+    def test_valid_dart_only_aggregate_does_not_invent_allocations(self):
+        data = self.data(self.dart(), nh=[])
+        digest = main.prepare_bond_schedule_digest(data, main.build_bond_history_state(), self.reference)
+        self.assertTrue(digest["reliable"])
+        section = main.build_bond_market_section(data, schedule_digest=digest)
+        self.assertIn("1/2년 1,250억원", section)
+        self.assertNotIn("1년 500억원", section)
+
+    def test_ls_shared_total_is_valid_after_matching_dart_merge(self):
+        nh = self.lotte()
+        nh.update(issuer="LS증권", term="1.5/2년", amount_eok=700,
+                  reported_total_eok=700, max_amount_eok=1400, amount_basis="shared_total",
+                  tranches=[{"term": "1.5", "amount_eok": None}, {"term": "2", "amount_eok": None}])
+        dart = {k: v for k, v in nh.items() if k not in {"tranches", "amount_basis", "reported_total_eok"}}
+        dart["source"] = "dart"
+        event, = main.merge_bond_demand_events([dart], [nh])
+        self.assertEqual(main.bond_event_validation_errors(event), [])
+        self.assertEqual(main.format_tranche_amounts(event), "1.5/2년 700억원 (최대 1,400억원)")
+
+    def test_more_complete_dart_allocation_uses_same_resolved_history(self):
+        nh = self.lotte()
+        nh.update(amount_basis="shared_total", tranches=[
+            {"term": "1", "amount_eok": None}, {"term": "2", "amount_eok": None}])
+        dart = self.dart(tranches=self.lotte()["tranches"])
+        data = self.data(dart, nh=[nh])
+        digest = main.prepare_bond_schedule_digest(data, main.build_bond_history_state(), self.reference)
+        self.assertTrue(digest["reliable"])
+        record = next(iter(digest["next_history"]["events"].values()))
+        self.assertEqual(record["event"]["tranches"], dart["tranches"])
+        self.assertIn("2년 750억원", main.build_bond_market_section(data, schedule_digest=digest))
+
+    def test_shared_nh_cannot_mask_invalid_complete_dart_sum(self):
+        nh = self.lotte()
+        nh.update(amount_basis="shared_total", tranches=[
+            {"term": "1", "amount_eok": None}, {"term": "2", "amount_eok": None}])
+        self.assert_pending(self.data(self.dart(tranches=[
+            {"term": "1", "amount_eok": 500}, {"term": "2", "amount_eok": 500}]), nh=[nh]))
+
+    def test_dart_allocation_can_take_missing_payment_metadata_from_nh(self):
+        dart = self.dart(payment_date=None, tranches=self.lotte()["tranches"])
+        event, = main.merge_bond_demand_events([dart], [self.lotte()])
+        self.assertEqual(main.bond_event_validation_errors(event), [])
+        self.assertEqual(event["payment_date"], date(2026, 10, 16))
+
+    def test_explicitly_unknown_nh_does_not_erase_known_dart_aggregate(self):
+        nh = self.lotte()
+        nh.update(amount_eok=None, reported_total_eok=None, amount_basis="explicitly_unknown",
+                  tranches=[{"term": "1", "amount_eok": None}, {"term": "2", "amount_eok": None}])
+        event, = main.merge_bond_demand_events([self.dart()], [nh])
+        self.assertEqual(main.bond_event_validation_errors(event), [])
+        self.assertEqual(main.format_tranche_amounts(event), "1/2년 1,250억원")
+
+    def test_invalid_known_dart_amount_cannot_be_hidden_by_shared_nh(self):
+        nh = self.lotte()
+        nh.update(amount_basis="shared_total", tranches=[
+            {"term": "1", "amount_eok": None}, {"term": "2", "amount_eok": None}])
+        self.assert_pending(self.data(self.dart(tranches=[{"term": "1", "amount_eok": -500}]), nh=[nh]))
+
+
+    def test_distinct_issuances_for_same_issuer_remain_separate(self):
+        dart = self.dart(demand_date=date(2026, 10, 20), payment_date=date(2026, 10, 28))
+        events = main.merge_bond_demand_events([dart], [self.lotte()])
+        self.assertEqual(len(events), 2)
+        self.assertTrue(all(not main.bond_event_validation_errors(e) for e in events))
+
+    def test_ambiguous_duplicate_nh_schedule_cannot_be_hidden_by_dart(self):
+        self.assert_pending(self.data(self.dart(), nh=[self.lotte(), self.lotte()]))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import holidays
 import html
 import json
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
 import time
@@ -2471,41 +2471,140 @@ def nh_bond_event_reliable(event):
     return not nh_bond_validation_errors(event)
 
 
-def merge_bond_demand_events(dart_items, nh_items):
+def bond_event_validation_errors(event):
+    """Validate the resolved conditions at every display/history boundary."""
+    candidate = dict(event)
+    # DART currently extracts an aggregate, without allocating it by tenor.
+    # Validate that representation without inventing per-tenor amounts.
+    if event.get("source") == "dart" and not event.get("tranches"):
+        candidate["tranches"] = [
+            {"term": term.strip().removesuffix("년"), "amount_eok": None}
+            for term in str(event.get("term") or "").split("/")
+        ]
+        candidate["amount_basis"] = "shared_total"
+    return list(dict.fromkeys(
+        list(event.get("condition_errors") or [])
+        + nh_bond_validation_errors(candidate)
+    ))
+
+
+def merge_bond_conditions(dart_event, nh_event):
+    """Resolve a whole tenor/amount bundle only when known values agree."""
+    resolved = dict(dart_event)
+    errors = list(bond_event_validation_errors(nh_event))
+    for field in ("amount_eok", "max_amount_eok", "payment_date", "series"):
+        left, right = dart_event.get(field), nh_event.get(field)
+        if left not in (None, "") and right not in (None, "") and left != right:
+            errors.append(f"NH/DART {field} conflict")
+    if (dart_event.get("term") and nh_event.get("term")
+            and compact_bond_term_text(dart_event["term"]) != compact_bond_term_text(nh_event["term"])):
+        errors.append("NH/DART tenor conflict")
+    if bond_event_identity_key(dart_event) != bond_event_identity_key(nh_event):
+        errors.append("NH/DART security type conflict")
+
+    # A partial DART allocation may be completed by NH, provided every known
+    # tranche agrees. A conflicting allocation must never be silently replaced.
+    nh_amounts = {
+        str(t.get("term", "")).removesuffix("년"): t.get("amount_eok")
+        for t in nh_event.get("tranches") or []
+        if isinstance(t, dict)
+    }
+    dart_tranches = dart_event.get("tranches") or []
+    if not isinstance(dart_tranches, list):
+        errors.append("invalid DART tranche schema")
+    else:
+        seen = set()
+        for tranche in dart_tranches:
+            if not isinstance(tranche, dict):
+                errors.append("invalid DART tranche schema")
+                continue
+            term = str(tranche.get("term", "")).removesuffix("년")
+            amount = tranche.get("amount_eok")
+            if term in seen or term not in nh_amounts:
+                errors.append("NH/DART tranche tenor conflict")
+            elif amount is not None and nh_amounts[term] is not None and amount != nh_amounts[term]:
+                errors.append("NH/DART tranche amount conflict")
+            seen.add(term)
+    errors.extend(dart_event.get("validation_errors") or [])
+    errors.extend(dart_event.get("condition_errors") or [])
+    if (dart_event.get("reported_total_eok") is not None
+            and dart_event["reported_total_eok"] != nh_event.get("amount_eok")):
+        errors.append("NH/DART reported total conflict")
+
+    # Prefer a complete allocation over an aggregate, keeping its basis/total
+    # metadata together. Compatible missing metadata can still be enriched.
+    dart_errors = bond_event_validation_errors(dart_event)
+    errors.extend(error for error in dart_errors if error in {
+        "invalid tranche schema", "invalid tranche amount", "invalid total amount",
+        "reported total mismatch", "maximum below total or invalid", "tranche sum exceeds total",
+    })
+    dart_complete = not dart_errors
+    dart_known = sum(
+        isinstance(t, dict) and t.get("amount_eok") is not None
+        for t in dart_tranches
+    ) if isinstance(dart_tranches, list) else 0
+    nh_known = sum(amount is not None for amount in nh_amounts.values())
+    if (isinstance(dart_tranches, list) and dart_tranches
+            and dart_known == len(dart_tranches) == len(nh_amounts)
+            and "tranche sum/total mismatch" in dart_errors):
+        errors.append("tranche sum/total mismatch")
+    use_dart_bundle = dart_complete and (
+        dart_known > nh_known
+        or (dart_event.get("amount_eok") is not None and nh_event.get("amount_eok") is None)
+    )
+    bundle = dart_event if use_dart_bundle else nh_event
+    for field in ("term", "tranches", "amount_eok", "amount_basis", "reported_total_eok"):
+        resolved.pop(field, None)
+        if field in bundle:
+            resolved[field] = bundle[field]
+    for field in (
+        "rating", "managers", "security_type", "max_amount_eok", "payment_date",
+        "series", "rate_band", "demand_date_text",
+    ):
+        if not resolved.get(field) and nh_event.get(field):
+            resolved[field] = nh_event[field]
+    resolved["nh_report_url"] = nh_event.get("report_url")
+    resolved["condition_errors"] = list(dict.fromkeys(errors))
+    return resolved
+
+
+def merge_bond_demand_events(dart_items, nh_items, nh_issues=None):
     merged = {}
+    rejected_issuers = {
+        normalize_bond_issuer_key(issue.get("issuer", ""))
+        for issue in nh_issues or []
+        if issue.get("issuer") and issue["issuer"] != "unknown"
+    }
     for event in nh_items or []:
-        if not nh_bond_event_reliable(event):
-            continue
         demand_date = event.get("demand_date")
         issuer_key = normalize_bond_issuer_key(event.get("issuer", ""))
-        if not issuer_key or not demand_date:
+        if issuer_key and not nh_bond_event_reliable(event):
+            rejected_issuers.add(issuer_key)
+        if not issuer_key or not isinstance(demand_date, date):
             continue
-        merged[(issuer_key, demand_date)] = dict(event)
+        key = (issuer_key, demand_date)
+        candidate = dict(event)
+        if key in merged:
+            candidate["condition_errors"] = ["ambiguous NH schedules for issuer/date"]
+        merged[key] = candidate
 
     for event in dart_items or []:
         demand_date = event.get("demand_date")
         issuer_key = normalize_bond_issuer_key(event.get("issuer", ""))
-        if not issuer_key or not demand_date:
+        if not issuer_key or not isinstance(demand_date, date):
             continue
         key = (issuer_key, demand_date)
         nh_event = merged.get(key)
-        authoritative = dict(event)
-        if nh_event:
-            for field in (
-                "rating",
-                "term",
-                "tranches",
-                "managers",
-                "security_type",
-                "amount_eok",
-                "max_amount_eok",
-                "payment_date",
-                "rate_band",
-                "demand_date_text",
-            ):
-                if not authoritative.get(field) and nh_event.get(field):
-                    authoritative[field] = nh_event[field]
-            authoritative["nh_report_url"] = nh_event.get("report_url")
+        for other_key, other in merged.items():
+            if other_key == key or other_key[0] != issuer_key:
+                continue
+            if any(event.get(field) and event.get(field) == other.get(field) for field in ("payment_date", "series")):
+                other["condition_errors"] = list(other.get("condition_errors") or []) + ["conflicting demand dates for same issuance"]
+                event = {**event, "condition_errors": ["conflicting demand dates for same issuance"]}
+        authoritative = merge_bond_conditions(event, nh_event) if nh_event else dict(event)
+        if issuer_key in rejected_issuers:
+            authoritative["condition_errors"] = list(authoritative.get("condition_errors") or []) + ["NH issuer conditions rejected"]
+        authoritative["condition_errors"] = bond_event_validation_errors(authoritative)
         merged[key] = authoritative
 
     return sorted(
@@ -2718,6 +2817,11 @@ def describe_bond_event_changes(previous, current):
     for field, label, formatter in field_specs:
         if previous.get(field) == current.get(field):
             continue
+        if field in {"security_type", "start_time", "end_time"} and (
+            not previous.get(field) or not current.get(field)
+        ):
+            # Temporary loss of optional DART enrichment is not a condition change.
+            continue
         changes.append(
             f"{label} {formatter(previous.get(field))} → "
             f"{formatter(current.get(field))}"
@@ -2754,6 +2858,7 @@ def collect_bond_schedule_candidates(bond_market_data, reference_date):
     demand_events = merge_bond_demand_events(
         dart_result.get("items", []),
         nh_result.get("items", []),
+        nh_result.get("validation_errors", []),
     )
     today_events = [
         event
@@ -2768,7 +2873,7 @@ def collect_bond_schedule_candidates(bond_market_data, reference_date):
     undated_events = [
         event
         for event in nh_result.get("items", [])
-        if nh_bond_event_reliable(event) and not event.get("demand_date")
+        if not event.get("demand_date")
     ]
     nh_led_future_events = [
         event
@@ -2791,30 +2896,6 @@ def collect_bond_schedule_candidates(bond_market_data, reference_date):
     return demand_events, today_events, unique_candidates
 
 
-def select_bond_history_source_event(event, nh_items):
-    identity_key = bond_event_identity_key(event)
-    matches = [
-        nh_event
-        for nh_event in nh_items or []
-        if bond_event_identity_key(nh_event) == identity_key
-    ]
-    if not matches:
-        return event
-
-    demand_date = event.get("demand_date")
-    payment_date = event.get("payment_date")
-    for nh_event in matches:
-        if demand_date and nh_event.get("demand_date") == demand_date:
-            return nh_event
-        if (
-            not demand_date
-            and payment_date
-            and nh_event.get("payment_date") == payment_date
-        ):
-            return nh_event
-    return matches[0]
-
-
 def bond_schedule_snapshot_reliable(bond_market_data, reference_date):
     nh_result = bond_market_data.get("nh") or {}
     source_date = nh_result.get("source_date")
@@ -2825,6 +2906,10 @@ def bond_schedule_snapshot_reliable(bond_market_data, reference_date):
         and nh_result.get("status") in {"ok", "empty"}
         and not nh_result.get("validation_errors")
         and all(nh_bond_event_reliable(event) for event in nh_result.get("items", []))
+        and all(
+            not bond_event_validation_errors(event)
+            for event in collect_bond_schedule_candidates(bond_market_data, reference_date)[0]
+        )
     )
 
 
@@ -2851,7 +2936,7 @@ def prepare_bond_schedule_digest(
     )
     if not reliable:
         logging.warning(
-            "   [Bond History] Current NH snapshot is unavailable, stale or invalid; "
+            "   [Bond History] Current NH/merged snapshot is unavailable, stale or invalid; "
             "comparison and history update skipped."
         )
         return {
@@ -2862,7 +2947,6 @@ def prepare_bond_schedule_digest(
 
     baseline = not bond_history.get("initialized", False)
     previous_events = bond_history.get("events", {})
-    nh_items = (bond_market_data.get("nh") or {}).get("items", [])
     current_keys = set()
     next_events = {}
     digest = {
@@ -2890,8 +2974,7 @@ def prepare_bond_schedule_digest(
                 f"   [Bond History] Multiple active schedules share an identity: {key}"
             )
         current_keys.add(key)
-        history_source_event = select_bond_history_source_event(event, nh_items)
-        snapshot = snapshot_bond_event(history_source_event)
+        snapshot = snapshot_bond_event(event)
         fingerprint = bond_event_fingerprint(snapshot)
         previous_record = previous_events.get(key)
         next_events[key] = {
@@ -2986,6 +3069,8 @@ def format_bond_event_link(event):
 
 
 def format_nh_mail_schedule_line(event):
+    if bond_event_validation_errors(event):
+        return f"- {format_bond_event_link(event)}: 조건 확인 중"
     parts = []
     if event.get("end_time"):
         parts.append(f"<b>{event['end_time']}</b>")
@@ -3009,6 +3094,8 @@ def format_nh_mail_schedule_line(event):
 
 
 def format_tranche_amounts(event):
+    if bond_event_validation_errors(event):
+        return "조건 확인 중"
     tranches = event.get("tranches") or []
     tranche_texts = []
     has_complete_tranche_amounts = (
@@ -3042,6 +3129,8 @@ def format_tranche_amounts(event):
 
 
 def format_nh_mail_detail(event, status_label=None, changes=None):
+    if bond_event_validation_errors(event):
+        return [f"<b>■ {format_bond_event_link(event)}</b>", "- 조건 확인 중"]
     title = format_bond_event_link(event)
     if event.get("rating"):
         title += f" ({html.escape(event['rating'])})"
@@ -3196,10 +3285,15 @@ def build_bond_market_section(
         or nh_result.get("validation_errors")
         or any(not nh_bond_event_reliable(event) for event in nh_result.get("items", []))
     ):
-        lines.append("※ NH 예정표 일부 조건 검증 실패: 해당 종목 상세 제외, 조건 비교·이력 갱신 보류")
+        lines.append("※ NH 예정표 일부 조건 검증 실패: 해당 종목 조건 확인 중, 조건 비교·이력 갱신 보류")
+    elif any(bond_event_validation_errors(event) for event in demand_events):
+        lines.append("※ 병합 조건 검증 실패: 해당 종목 조건 확인 중, 조건 비교·이력 갱신 보류")
 
     max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
-    digest_reliable = schedule_digest and schedule_digest.get("reliable")
+    digest_reliable = (
+        schedule_digest and schedule_digest.get("reliable")
+        and bond_schedule_snapshot_reliable(bond_market_data, reference_date)
+    )
     if digest_reliable:
         detail_entries = []
         if schedule_digest.get("baseline"):

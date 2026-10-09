@@ -1487,7 +1487,7 @@ class BondMarketTests(unittest.TestCase):
             ["롯데건설", "삼양패키징", "우리금융에프앤아이", "코웨이"],
         )
 
-    def test_dart_event_wins_over_matching_nh_schedule(self):
+    def test_conflicting_dart_amount_is_not_combined_with_nh_tranches(self):
         dart_event = {
             "source": "dart",
             "issuer": "하나에프앤아이",
@@ -1511,8 +1511,8 @@ class BondMarketTests(unittest.TestCase):
 
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["source"], "dart")
-        self.assertEqual(merged[0]["amount_eok"], 1500)
-        self.assertEqual(merged[0]["max_amount_eok"], 3000)
+        self.assertTrue(main.bond_event_validation_errors(merged[0]))
+        self.assertEqual(main.format_tranche_amounts(merged[0]), "조건 확인 중")
         self.assertEqual(merged[0]["report_url"], "https://dart.example/hana")
 
     def test_section_uses_concise_nh_mail_format(self):
@@ -1811,7 +1811,7 @@ class BondMarketTests(unittest.TestCase):
             "security_type": "무보증사채",
             "start_time": "09:00",
             "end_time": "16:00",
-            "amount_eok": 600,
+            "amount_eok": 500,
             "report_url": "https://dart.example/report",
         }
         first_data = self._bond_market_data(day_one, [nh_event])
