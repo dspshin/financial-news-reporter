@@ -1,0 +1,8 @@
+{
+  "source": "Actual NH company issuance PDF downloaded 2026-10-12; pypdf layout extraction, not synthetic.",
+  "url": "http://nhisib.kr/syndication/List/회사채발행예정리스트_261012.pdf",
+  "pdf_sha256": "67b3ecc397ea448ef00b814869fe0e967b41d54e1e98a7a2c8c94616be161ea2",
+  "created_at": "2026-10-12T07:57:32+09:00",
+  "layout_sha256": "15b26e74a92276bd69b7640dc8ff8a78d8516e95b75b726ad02dbf449fcd3999",
+  "limit": "Not the archived input used by the GP server at 09:00."
+}

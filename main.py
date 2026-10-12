@@ -14,6 +14,7 @@ from google import genai
 import holidays
 import html
 import json
+import hashlib
 import re
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
@@ -1961,10 +1962,18 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
         "pdf_url": build_nh_syndication_pdf_url(reference_date),
         "source_date": None,
         "created_at": None,
+        "issuance_items": [],
+        "source_attempts": [],
     }
 
-    for offset in range(lookback_days + 1):
-        source_date = reference_date - timedelta(days=offset)
+    source_dates = [reference_date]
+    calendar = holidays.KR(years=[reference_date.year - 1, reference_date.year])
+    previous = reference_date
+    while len(source_dates) <= lookback_days:
+        previous -= timedelta(days=1)
+        if previous.weekday() < 5 and previous not in calendar:
+            source_dates.append(previous)
+    for source_date in source_dates:
         pdf_url = build_nh_syndication_pdf_url(source_date)
         try:
             response = requester.get(
@@ -1972,6 +1981,8 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 headers=HEADERS,
                 timeout=(10, timeout),
             )
+            result["source_attempts"].append({"source_date": source_date.isoformat(),
+                "url": pdf_url, "http_status": response.status_code})
             if response.status_code == 404:
                 continue
             response.raise_for_status()
@@ -1979,6 +1990,12 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 raise ValueError("response is not a PDF")
 
             pdf_text, created_at = extract_nh_syndication_pdf(response.content)
+            title_date = re.match(r"\s*(20\d{2})[-/](\d{1,2})[-/](\d{1,2})", pdf_text)
+            if title_date and date(*map(int, title_date.groups())) != source_date:
+                raise ValueError("PDF report date does not match requested date")
+            page_dates = re.findall(r"^\s*(20\d{2})[-/](\d{1,2})[-/](\d{1,2})(?=[^\n]*List)", pdf_text, re.M)
+            if any(date(*map(int, values)) != source_date for values in page_dates):
+                raise ValueError("inconsistent PDF page report dates")
             validation_issues = []
             events = parse_nh_syndication_text(
                 pdf_text,
@@ -1993,6 +2010,7 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                     "; ".join(issue.get("errors", [])),
                 )
             planned_end_date = reference_date + timedelta(days=planned_lookahead_days)
+            issuance_items = [event for event in events if event.get("payment_date") == reference_date]
             events = [
                 event
                 for event in events
@@ -2007,8 +2025,8 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
             ]
             result.update({
                 "status": (
-                    "stale" if offset else "partial" if validation_issues
-                    else "ok" if events else "empty"
+                    "stale" if source_date != reference_date else "partial" if validation_issues
+                    else "ok" if events or issuance_items else "empty"
                 ),
                 "validation_errors": validation_issues,
                 "items": sorted(
@@ -2021,15 +2039,26 @@ def fetch_nh_syndication_schedule(reference_date=None, requester=None):
                 "pdf_url": pdf_url,
                 "source_date": source_date,
                 "created_at": created_at,
+                "issuance_items": issuance_items,
             })
+            logging.info(
+                "   [Bond Market] NH report=%s created=%s bytes=%d planned=%d issuance=%d rejected=%d",
+                source_date, created_at, len(response.content), len(events), len(issuance_items), len(validation_issues),
+            )
             return result
         except requests.HTTPError as error:
             if getattr(error.response, "status_code", None) == 404:
                 continue
             result["errors"].append(str(error))
+            logging.warning("   [Bond Market] NH source failed: date=%s type=%s url=%s",
+                            source_date, type(error).__name__, pdf_url)
             continue
         except (requests.RequestException, PdfReadError, ValueError, OSError) as error:
             result["errors"].append(str(error))
+            result["source_attempts"].append({"source_date": source_date.isoformat(),
+                "url": pdf_url, "error_type": type(error).__name__})
+            logging.warning("   [Bond Market] NH source failed: date=%s type=%s url=%s",
+                            source_date, type(error).__name__, pdf_url)
             continue
 
     if result["errors"]:
@@ -2104,6 +2133,7 @@ def classify_kofia_bond(name):
         return "공사채"
     if (
         "은행" in name
+        or name.startswith("아이엠뱅크")
         or "금융채권" in name
         or name.startswith(("한국수출입금융", "농업금융채권"))
     ):
@@ -2114,6 +2144,11 @@ def classify_kofia_bond(name):
 
 
 def normalize_kofia_issuer(name):
+    aliases = {"한국전력": "한국전력공사", "국민카드": "케이비국민카드"}
+    if name in aliases:
+        return aliases[name]
+    if name.startswith("아이엠뱅크"):
+        return "아이엠뱅크"
     special_issuers = {
         "토지주택채권": "한국토지주택공사",
         "산업금융채권": "산업은행",
@@ -2137,7 +2172,7 @@ def normalize_kofia_issuer(name):
         issuer = issuer_match.group(1)
     else:
         issuer = re.sub(
-            r"(?<=[A-Za-z가-힣])\d{1,4}(?:[-A-Za-z가-힣().]*)?$",
+            r"(?<=[A-Za-z가-힣])\d{1,4}(?:[-0-9A-Za-z가-힣().]*)?$",
             "",
             name,
         ).strip()
@@ -2390,6 +2425,15 @@ def fetch_bond_market_data(
     dart_fetcher = dart_fetcher or fetch_dart_debt_disclosures
     kofia_fetcher = kofia_fetcher or fetch_kofia_bond_issuance
     nh_fetcher = nh_fetcher or fetch_nh_syndication_schedule
+    signatures = {}
+    for filename in ("main.py", "nh_bond_parser.py"):
+        try:
+            with open(os.path.join(os.path.dirname(__file__), filename), "rb") as source:
+                signatures[filename] = hashlib.sha256(source.read()).hexdigest()[:12]
+        except OSError:
+            signatures[filename] = "unavailable"
+    logging.info("   [Bond Market] code_revision=2026-10-12-sources-v2 path=%s files=%s reference_date=%s",
+                 os.path.abspath(__file__), signatures, reference_date)
     interval_seconds = max(1, parse_int_env("BOND_POLL_INTERVAL_SECONDS", 300))
     deadline = parse_bond_poll_deadline(reference_date)
     current_time = now_provider()
@@ -2496,6 +2540,12 @@ def merge_bond_conditions(dart_event, nh_event):
         left, right = dart_event.get(field), nh_event.get(field)
         if left not in (None, "") and right not in (None, "") and left != right:
             errors.append(f"NH/DART {field} conflict")
+    if (nh_event.get("no_increase") and dart_event.get("max_amount_eok") is not None
+            and dart_event.get("amount_eok") is not None
+            and isinstance(dart_event["max_amount_eok"], (int, float))
+            and isinstance(dart_event["amount_eok"], (int, float))
+            and dart_event["max_amount_eok"] > dart_event["amount_eok"]):
+        errors.append("NH/DART maximum conflicts with no increase")
     if (dart_event.get("term") and nh_event.get("term")
             and compact_bond_term_text(dart_event["term"]) != compact_bond_term_text(nh_event["term"])):
         errors.append("NH/DART tenor conflict")
@@ -2553,7 +2603,7 @@ def merge_bond_conditions(dart_event, nh_event):
         or (dart_event.get("amount_eok") is not None and nh_event.get("amount_eok") is None)
     )
     bundle = dart_event if use_dart_bundle else nh_event
-    for field in ("term", "tranches", "amount_eok", "amount_basis", "reported_total_eok"):
+    for field in ("term", "tranches", "amount_eok", "amount_basis", "reported_total_eok", "no_increase"):
         resolved.pop(field, None)
         if field in bundle:
             resolved[field] = bundle[field]
@@ -3176,6 +3226,33 @@ def get_kofia_mail_category_names(kofia_result, category):
     return names
 
 
+def bond_issuance_names(kofia_result, nh_result, reference_date):
+    """Supplement names from a fresh NH PDF without mixing issuance amounts."""
+    categories = {
+        category: list(dict.fromkeys(normalize_kofia_issuer(name)
+            for name in get_kofia_mail_category_names(kofia_result, category)))
+        for category in BOND_CATEGORY_ORDER
+    }
+    supplements = []
+
+    def add(issuer, category):
+        issuer = normalize_kofia_issuer(issuer)
+        if (not issuer or "유동화" in issuer
+                or any(word in issuer for word in KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS)
+                or issuer in KOFIA_ROUTINE_POLICY_BANK_ISSUERS
+                or get_bond_exclusion_reason(issuer, 1)):
+            return
+        if not any(issuer in names for names in categories.values()):
+            categories[category].append(issuer)
+            supplements.append(issuer)
+
+    if nh_result.get("source_date") == reference_date and nh_result.get("status") in {"ok", "partial"}:
+        for event in nh_result.get("issuance_items", nh_result.get("items", [])):
+            if event.get("payment_date") == reference_date and nh_bond_event_reliable(event):
+                add(event["issuer"], classify_kofia_bond(event["issuer"]))
+    return categories, supplements
+
+
 def build_bond_market_section(
     bond_market_data,
     reference_date=None,
@@ -3223,8 +3300,11 @@ def build_bond_market_section(
         "회사채": "회사채",
     }
     issuance_lines = 0
+    issuance_categories, nh_issuance_supplements = bond_issuance_names(
+        kofia_result, nh_result, reference_date,
+    )
     for category in BOND_CATEGORY_ORDER:
-        names = get_kofia_mail_category_names(kofia_result, category)
+        names = issuance_categories[category]
         if not names:
             continue
         max_issuers = max(
@@ -3239,6 +3319,9 @@ def build_bond_market_section(
             f"- <b>{category_labels[category]}</b>: {issuer_text}"
         )
         issuance_lines += 1
+    if nh_issuance_supplements:
+        lines.append("※ NH 원문으로 보완한 당일 발행 예정: "
+                     + ", ".join(html.escape(name) for name in nh_issuance_supplements))
 
     if not issuance_lines:
         if kofia_result.get("status") == "error":
@@ -3259,19 +3342,24 @@ def build_bond_market_section(
             + ", ".join(html.escape(name) for name in dict.fromkeys(pending_issuers))
         )
 
-    lines.extend(["", "<b>[ 금일 주요 일정 ]</b>"])
+    lines.extend(["", "<b>[ 금일 수요예측 일정 ]</b>"])
     if today_events:
         lines.extend(format_nh_mail_schedule_line(event) for event in today_events)
-    elif (
-        dart_result.get("status") == "error"
-        and nh_result.get("status") in {"error", "unavailable"}
-    ):
-        lines.append("- 수요예측 일정 수집 실패")
-    else:
-        lines.append("- 없음")
+    demand_complete = (
+        dart_result.get("status") in {"ok", "empty"}
+        and bond_schedule_snapshot_reliable(bond_market_data, reference_date)
+    )
+    if not today_events:
+        if not demand_complete:
+            lines.append("- 일정 확인 불가 (자료 미확인 또는 검증 불완전)")
+        else:
+            lines.append("- 확인된 수요예측 일정 없음")
+    lines.append("※ NH 메일 본문에만 있는 입찰 일정은 포함되지 않습니다.")
 
     if nh_result.get("status") == "stale":
         source_date = nh_result.get("source_date")
+        if isinstance(source_date, str):
+            source_date = parse_history_date(source_date)
         source_date_text = (
             source_date.strftime("%m/%d") if source_date else "이전 영업일"
         )

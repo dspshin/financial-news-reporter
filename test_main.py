@@ -1568,7 +1568,7 @@ class BondMarketTests(unittest.TestCase):
         self.assertIn("여전채</b>: 현대캐피탈", section)
         self.assertIn("회사채</b>: 한국투자증권", section)
         self.assertIn("메리츠금융지주", section)
-        self.assertIn("[ 금일 주요 일정 ]", section)
+        self.assertIn("[ 금일 수요예측 일정 ]", section)
         self.assertIn("최대 2,800억원", section)
         self.assertIn("대표주관: NH / KB / 한투 / 신한", section)
         self.assertIn("밴드: 개별 -30~+30bp", section)
@@ -1870,8 +1870,9 @@ class BondMarketTests(unittest.TestCase):
             }
         )
 
-        self.assertIn("[ 금일 주요 일정 ]", section)
-        self.assertIn("- 없음", section)
+        self.assertIn("[ 금일 수요예측 일정 ]", section)
+        self.assertIn("일정 확인 불가", section)
+        self.assertNotIn("\n- 없음\n", section)
         self.assertIn("금투협 발행정보 수집 실패", section)
         self.assertNotIn("GP 체크", section)
 

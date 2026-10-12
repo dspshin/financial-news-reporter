@@ -6,7 +6,7 @@ so a partially readable table cannot be used as a complete history snapshot.
 
 import math
 import re
-from datetime import date, timedelta
+from datetime import date
 
 
 RATING = r"(?:AAA|AA[+\-0]?|A[+\-0]?|BBB[+\-0]?|BB[+\-0]?|B[+\-0]?)(?:\(P\))?"
@@ -15,7 +15,7 @@ TERM = r"(?:\d+(?:\.\d+)?(?:NC\d+(?:\.\d+)?)?년?|영구)"
 TERMS = rf"{TERM}(?:\s*/\s*{TERM})*"
 AMOUNT = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:억(?:원)?)?"
 UNKNOWN = r"금액\s*미정|미정"
-MANAGER = re.compile(r"(?<![0-9A-Za-z가-힣])(?:NH|KB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK)(?:/(?:NH|KB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK))*(?=\s|$)")
+MANAGER = re.compile(r"(?<![0-9A-Za-z가-힣])(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK)(?:/(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK))*(?=\s|$)")
 SCHEDULE = re.compile(r"(?P<demand>\d{1,2}/\d{1,2}(?:\([^)]+\))?|미정)\s+(?P<payment>\d{1,2}/\d{1,2}(?:\([^)]+\))?)")
 BAND = re.compile(r"(?:(개별(?:민평)?|등급(?:민평)?)\s*)?(-?\d+(?:\.\d+)?)\s*~\s*(\+?\d+(?:\.\d+)?)")
 
@@ -72,6 +72,28 @@ def validation_errors(event):
     maximum = event.get("max_amount_eok")
     if maximum is not None and (not positive_amount(maximum) or (positive_amount(total) and maximum < total)):
         errors.append("maximum below total or invalid")
+    issued = event.get("issued_tranches")
+    if issued is not None:
+        if not isinstance(issued, list) or any(not isinstance(t, dict) for t in issued):
+            errors.append("invalid issued tranche schema")
+        else:
+            issued_terms = [str(t.get("term", "")).removesuffix("년") for t in issued]
+            issued_amounts = [t.get("amount_eok") for t in issued]
+            if issued_terms != terms or any(a is not None and not positive_amount(a) for a in issued_amounts):
+                errors.append("invalid issued tranche conditions")
+            known_issued = [a for a in issued_amounts if positive_amount(a)]
+            if positive_amount(maximum) and sum(known_issued) > maximum:
+                errors.append("known issued amount exceeds maximum")
+            if issued_amounts and all(positive_amount(a) for a in issued_amounts):
+                issued_total = event.get("issued_amount_eok")
+                if not positive_amount(issued_total) or not math.isclose(sum(issued_amounts), issued_total, abs_tol=0.001):
+                    errors.append("issued tranche sum/total mismatch")
+                elif positive_amount(maximum) and issued_total > maximum:
+                    errors.append("issued total exceeds maximum")
+                elif event.get("no_increase") and positive_amount(total) and issued_total != total:
+                    errors.append("issued total conflicts with no increase")
+            elif event.get("issued_amount_eok") is not None:
+                errors.append("incomplete issued allocation with total")
     demand, payment = event.get("demand_date"), event.get("payment_date")
     if not isinstance(payment, date) or (demand is not None and (not isinstance(demand, date) or demand > payment)):
         errors.append("invalid schedule")
@@ -108,14 +130,54 @@ def _columns(line):
     }
 
 
+def _wide_columns(line, following):
+    """NH's multi-row header separates predicted/issued/underwritten amounts."""
+    labels = {name: re.search(label, line) for name, label in {
+        "term": r"만기", "amount": r"예측(?!결과)", "esg": r"ESG",
+        "issued": r"발행", "underwriting": r"당사인수", "max": r"증액가능",
+    }.items()}
+    if not all(labels.values()):
+        return None
+    positions = [labels[name].start() for name in ("term", "amount", "esg", "issued", "underwriting", "max")]
+    if positions != sorted(positions) or len(set(positions)) != len(positions):
+        return None
+    issuer_header = next((row for row in following if "발행회사" in row and "신용등급" in row), "")
+    units = next((row for row in following if "(Y)" in row and row.count("금액(억)") >= 4), "")
+    rating = re.search(r"신용등급", issuer_header)
+    manager = re.search(r"대표\s*주관", issuer_header)
+    amounts = list(re.finditer(r"금액\(억\)", units))
+    tenor = re.search(r"\(Y\)", units)
+    esg = re.search(r"여부", units)
+    if not (rating and manager and tenor and esg and len(amounts) >= 4):
+        return None
+    if not amounts[0].end() < esg.start() < amounts[1].start():
+        return None
+    # The gaps between unit labels accommodate right-aligned numeric cells.
+    return {
+        "term": ((rating.start() + rating.end() + labels["term"].start() + labels["term"].end()) // 4,
+                 (tenor.end() + amounts[0].start()) // 2),
+        "amount": ((tenor.end() + amounts[0].start()) // 2,
+                   (amounts[0].end() + esg.start()) // 2),
+        "issued_amount": ((esg.end() + amounts[1].start()) // 2,
+                          (amounts[1].end() + amounts[2].start()) // 2),
+        "max": ((amounts[2].end() + amounts[3].start()) // 2,
+                (amounts[3].end() + manager.start()) // 2),
+    }
+
+
 def _month_day(value, reference_date):
     match = re.search(r"(\d{1,2})/(\d{1,2})", value)
     if not match:
         return None
-    result = reference_date.replace(month=int(match[1]), day=int(match[2]))
-    if result < reference_date - timedelta(days=180):
-        result = result.replace(year=result.year + 1)
-    return result
+    candidates = []
+    for year in (reference_date.year - 1, reference_date.year, reference_date.year + 1):
+        try:
+            candidates.append(date(year, int(match[1]), int(match[2])))
+        except ValueError:
+            continue
+    if not candidates:
+        raise ValueError("invalid month/day")
+    return min(candidates, key=lambda value: abs((value - reference_date).days))
 
 
 def _metadata_area(line):
@@ -134,6 +196,7 @@ def _add_terms(row, cell, amount_cell):
         amount = None
     for term in terms:
         row["tranches"].append({"term": term, "amount_eok": amount})
+        row["issued_amounts"].append(None)
         row["unknown"].append(unknown)
 
 
@@ -146,6 +209,12 @@ def _set_total(row, value):
 def _parse_cells(row, line, columns, first):
     if columns:
         cells = {name: line[start:end].strip() for name, (start, end) in columns.items()}
+        if "issued_amount" in columns:
+            # A left-aligned manager can start before its centered header.
+            start, end = columns["max"]
+            manager = next((m for m in MANAGER.finditer(line) if m.start() > start), None)
+            cells["max"] = line[start:min(end, manager.start()) if manager else end].strip()
+        before = len(row["tranches"])
         if cells["term"]:
             _add_terms(row, cells["term"], cells["amount"])
         elif cells["amount"]:
@@ -156,6 +225,13 @@ def _parse_cells(row, line, columns, first):
                 amount, unknown = _amount(cells["amount"])
                 row["tranches"][-1]["amount_eok"] = amount
                 row["unknown"][-1] = unknown
+        issued = cells.get("issued_amount")
+        if issued and issued != "-":
+            value, _ = _amount(issued)
+            if len(row["tranches"]) - before == 1:
+                row["issued_amounts"][-1] = value
+            else:
+                row["errors"].append("ambiguous issued amount cell")
         if cells.get("total"):
             total, unknown = _amount(cells["total"])
             if unknown:
@@ -219,15 +295,26 @@ def _parse_cells(row, line, columns, first):
 def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
     diagnostics = diagnostics if diagnostics is not None else []
     rows, current, columns = [], None, None
-    for raw_line in (text or "").split("\n"):
+    unsafe_layout = False
+    raw_lines = (text or "").split("\n")
+    for index, raw_line in enumerate(raw_lines):
         if "\f" in raw_line:
             columns = None
             raw_line = raw_line.replace("\f", "")
         line = raw_line.expandtabs(8).rstrip()
-        header = _columns(line)
+        header = _wide_columns(line, [s.expandtabs(8) for s in raw_lines[index + 1:index + 4]]) or _columns(line)
         if header:
             columns = header
+            unsafe_layout = False
             # Repeated headers may separate an issuer's tranches across pages.
+            continue
+        if all(word in line for word in ("만기", "예측", "당사인수", "증액가능")):
+            columns = None
+            unsafe_layout = True
+            continue
+        if (re.match(r"\s*20\d{2}[-/]\d{1,2}[-/]\d{1,2}", line) and "List" in line) or "당사 대표주관" in line or "당사 인수" in line:
+            continue
+        if ("발행회사" in line and "신용등급" in line) or ("(Y)" in line and line.count("금액(억)") >= 4):
             continue
         first = ISSUER_ROW.match(line)
         if first:
@@ -235,11 +322,12 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
                 "issuer": " ".join(first["issuer"].split()),
                 "rating": first["rating"],
                 "tranches": [],
+                "issued_amounts": [],
                 "unknown": [],
                 "total": None,
                 "max": None,
                 "no_increase": False,
-                "errors": [],
+                "errors": ["unrecognized multi-row header"] if unsafe_layout else [],
                 "lines": [],
             }
             rows.append(current)
@@ -254,6 +342,13 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
         elif not current:
             if re.search(r"\d{1,2}/\d{1,2}\([^)]+\)", line) and re.search(RATING, line):
                 diagnostics.append({"issuer": "unknown", "errors": ["unrecognized issuer row"]})
+            continue
+        elif columns and re.fullmatch(r"\([^)]*\)", line[:columns["term"][0]].strip()):
+            # Collateral/guarantee descriptions occupy the issuer column while
+            # the same physical row carries a continuation tenor and amount.
+            pass
+        elif not columns and re.match(r"^\s*\([^)]*\)\s+\d", line):
+            current["errors"].append("description continuation needs column header")
             continue
         elif not re.match(r"^\s+(?:\d|영구|금액|미정|증액)", line):
             # Metadata can wrap independently of the numeric columns.
@@ -315,6 +410,7 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
             "amount_basis": basis,
             "reported_total_eok": row["total"],
             "max_amount_eok": None if row["no_increase"] else row["max"],
+            "no_increase": row["no_increase"],
             "managers": manager[0].split("/") if manager else [],
             "security_type": None,
             "demand_date": demand,
@@ -326,6 +422,15 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
             "report_url": pdf_url,
             "validation_errors": row["errors"],
         }
+        if "issued_amounts" in row and any(a is not None for a in row["issued_amounts"]):
+            event["issued_tranches"] = [
+                {"term": t["term"], "amount_eok": amount}
+                for t, amount in zip(tranches, row["issued_amounts"])
+            ]
+            event["issued_amount_eok"] = (
+                sum(row["issued_amounts"])
+                if all(positive_amount(a) for a in row["issued_amounts"]) else None
+            )
         errors = validation_errors(event)
         if errors:
             diagnostics.append({"issuer": row["issuer"], "errors": errors})
