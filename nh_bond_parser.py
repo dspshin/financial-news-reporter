@@ -15,9 +15,18 @@ TERM = r"(?:\d+(?:\.\d+)?(?:NC\d+(?:\.\d+)?)?년?|영구)"
 TERMS = rf"{TERM}(?:\s*/\s*{TERM})*"
 AMOUNT = r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:억(?:원)?)?"
 UNKNOWN = r"금액\s*미정|미정"
-MANAGER = re.compile(r"(?<![0-9A-Za-z가-힣])(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK)(?:/(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|SK))*(?=\s|$)")
+MANAGER = re.compile(r"(?<![0-9A-Za-z가-힣])(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|현대차|SK)(?:/(?:NH|KB|DB|한투|신한|미래|키움|삼성|하나|우리|교보|한양|대신|현대차|SK))*(?=\s|$)")
 SCHEDULE = re.compile(r"(?P<demand>\d{1,2}/\d{1,2}(?:\([^)]+\))?|미정)\s+(?P<payment>\d{1,2}/\d{1,2}(?:\([^)]+\))?)")
 BAND = re.compile(r"(?:(개별(?:민평)?|등급(?:민평)?)\s*)?(-?\d+(?:\.\d+)?)\s*~\s*(\+?\d+(?:\.\d+)?)")
+
+
+class NHLayoutText(str):
+    """Layout text with cell evidence extracted from the same PDF page."""
+
+    def __new__(cls, text, cell_overrides=None):
+        value = super().__new__(cls, text)
+        value.cell_overrides = cell_overrides or {}
+        return value
 
 
 def valid_term(value):
@@ -165,6 +174,139 @@ def _wide_columns(line, following):
     }
 
 
+def extract_pdf_cell_overrides(page, layout):
+    """Use PDF coordinates for columns and explicit clipping boxes for totals.
+
+    The text rows must match every physical tenor row in order. A shared amount
+    additionally requires a planned-amount cell spanning the entire issuer's
+    tenor group. Plain text alone cannot establish that a blank is a merge.
+    """
+    records, stack = [], []
+    state = {"clip": None, "path": None}
+    last_show = None
+
+    def point(x, y, matrix):
+        return (x * matrix[0] + y * matrix[2] + matrix[4],
+                x * matrix[1] + y * matrix[3] + matrix[5])
+
+    def before(operator, operands, cm, tm):
+        nonlocal last_show, state
+        if operator == b"q":
+            stack.append(dict(state))
+        elif operator == b"Q":
+            state = stack.pop() if stack else {"clip": None, "path": None}
+        elif operator == b"re":
+            x, y, width, height = map(float, operands)
+            # Only axis-aligned cell boxes are usable evidence.
+            if abs(cm[1]) < 0.001 and abs(cm[2]) < 0.001:
+                x1, y1 = point(x, y, cm)
+                x2, y2 = point(x + width, y + height, cm)
+                state["path"] = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            else:
+                state["path"] = None
+        elif operator in {b"W", b"W*"}:
+            state["clip"] = state["path"]
+        elif operator in {b"m", b"l", b"c", b"v", b"y", b"n", b"S", b"s", b"f", b"f*"}:
+            state["path"] = None
+        elif operator in {b"Tj", b"TJ"}:
+            horizontal = (tm[0] * cm[0] + tm[1] * cm[2], tm[0] * cm[1] + tm[1] * cm[3])
+            vertical = (tm[2] * cm[0] + tm[3] * cm[2], tm[2] * cm[1] + tm[3] * cm[3])
+            if (abs(horizontal[1]) < 0.001 and abs(vertical[0]) < 0.001
+                    and horizontal[0] > 0 and vertical[1] > 0):
+                last_show = (*point(tm[4], tm[5], cm), state["clip"], horizontal[0], vertical[1])
+            else:
+                last_show = None
+
+    def visit(text, cm, tm, font, size):
+        # pypdf may reset tm before flushing a text object. Its last show
+        # operation retains the coordinates of the decoded cell text.
+        text = text.strip()
+        if text and last_show and "\n" not in text and "\r" not in text:
+            x, y, clip, xscale, yscale = last_show
+            width = size * xscale * sum(0.5 if ord(char) < 128 else 1 for char in text)
+            records.append({"text": text, "x": x, "y": y,
+                            "center": x + width / 2, "size": size * yscale, "clip": clip})
+
+    page.extract_text(visitor_operand_before=before, visitor_text=visit)
+    headers = {name: next((r for r in records if r["text"] == label), None)
+               for name, label in {"term": "만기", "amount": "예측", "esg": "ESG",
+                                   "issued": "발행", "underwriting": "당사인수", "max": "증액가능"}.items()}
+    if not all(headers.values()):
+        return {}
+    ordered = [headers[name] for name in ("term", "amount", "esg", "issued", "underwriting", "max")]
+    if (any(abs(r["y"] - ordered[0]["y"]) > ordered[0]["size"] for r in ordered)
+            or [r["center"] for r in ordered] != sorted(r["center"] for r in ordered)):
+        return {}
+    middle = lambda left, right: (headers[left]["center"] + headers[right]["center"]) / 2
+    ranges = {
+        "term": (headers["term"]["center"] - (middle("term", "amount") - headers["term"]["center"]), middle("term", "amount")),
+        "amount": (middle("term", "amount"), middle("amount", "esg")),
+        "issued_amount": (middle("esg", "issued"), middle("issued", "underwriting")),
+        "max": (middle("underwriting", "max"), float("inf")),
+    }
+    manager = next((r for r in records if re.fullmatch(r"대표\s*주관", r["text"])), None)
+    if not manager or manager["center"] <= headers["max"]["center"]:
+        return {}
+    ranges["max"] = (ranges["max"][0], (headers["max"]["center"] + manager["center"]) / 2)
+    physical = [r for r in records if ranges["term"][0] < r["center"] < ranges["term"][1]
+                and r["y"] < headers["term"]["y"] - 2 * r["size"]
+                and re.fullmatch(TERMS, r["text"])
+                and all(valid_term(t) for t in r["text"].split("/"))]
+    physical.sort(key=lambda r: -r["y"])
+    raw_rows, columns, issuer_start = [], None, None
+    lines = layout.split("\n")
+    for index, raw in enumerate(lines):
+        line = raw.expandtabs(8).rstrip()
+        header = _wide_columns(line, [s.expandtabs(8) for s in lines[index + 1:index + 4]])
+        if header:
+            columns = header
+            continue
+        if not columns:
+            continue
+        if ISSUER_ROW.match(line):
+            issuer_start = index
+        term = line[slice(*columns["term"])].strip()
+        if issuer_start is not None and re.fullmatch(TERMS, term):
+            raw_rows.append({"index": index, "line": line, "term": term, "issuer_start": issuer_start})
+    if len(raw_rows) != len(physical) or not raw_rows:
+        return {}
+    if any(row["term"] != record["text"] for row, record in zip(raw_rows, physical)):
+        return {}
+    overrides = {}
+    for row, tenor in zip(raw_rows, physical):
+        baseline = [r for r in records if abs(r["y"] - tenor["y"]) < min(r["size"], tenor["size"]) * 0.4]
+        cells = {"term": tenor["text"]}
+        for name in ("amount", "issued_amount", "max"):
+            start, end = ranges[name]
+            selected = [r for r in baseline if start < r["center"] < end]
+            if name == "max":
+                # Managers can be left-aligned within the broad header cell.
+                manager_start = min((r["x"] for r in baseline if MANAGER.fullmatch(r["text"])), default=end)
+                selected = [r for r in selected if r["x"] < manager_start]
+            cells[name] = " ".join(r["text"] for r in sorted(selected, key=lambda r: r["x"]))
+        overrides[row["index"]] = {"line": row["line"], "cells": cells}
+    for record in records:
+        clip = record["clip"]
+        if not clip or not re.fullmatch(AMOUNT, record["text"]):
+            continue
+        left, bottom, right, top = clip
+        if not (left < headers["amount"]["center"] < right < headers["esg"]["center"]):
+            continue
+        indices = [i for i, r in enumerate(physical) if bottom < r["y"] < top]
+        if len(indices) < 2:
+            continue
+        group = [row for row in raw_rows if row["issuer_start"] == raw_rows[indices[0]]["issuer_start"]]
+        if [raw_rows[i]["index"] for i in indices] != [row["index"] for row in group]:
+            continue
+        values = [r for r in records if r["clip"] == clip and re.fullmatch(AMOUNT, r["text"])]
+        if len(values) != 1:
+            continue
+        for row in group:
+            overrides[row["index"]]["cells"]["amount"] = ""
+        overrides[group[0]["index"]]["cells"]["total"] = record["text"]
+    return overrides
+
+
 def _month_day(value, reference_date):
     match = re.search(r"(\d{1,2})/(\d{1,2})", value)
     if not match:
@@ -206,10 +348,10 @@ def _set_total(row, value):
     row["total"] = value
 
 
-def _parse_cells(row, line, columns, first):
+def _parse_cells(row, line, columns, first, override=None):
     if columns:
-        cells = {name: line[start:end].strip() for name, (start, end) in columns.items()}
-        if "issued_amount" in columns:
+        cells = dict(override) if override else {name: line[start:end].strip() for name, (start, end) in columns.items()}
+        if "issued_amount" in columns and not override:
             # A left-aligned manager can start before its centered header.
             start, end = columns["max"]
             manager = next((m for m in MANAGER.finditer(line) if m.start() > start), None)
@@ -297,6 +439,7 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
     rows, current, columns = [], None, None
     unsafe_layout = False
     raw_lines = (text or "").split("\n")
+    overrides = text.cell_overrides if isinstance(text, NHLayoutText) else {}
     for index, raw_line in enumerate(raw_lines):
         if "\f" in raw_line:
             columns = None
@@ -360,7 +503,9 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
         current["lines"].append(line[first.end():] if first else line)
         try:
             numeric_line = line[first.end():] if first and not columns else line
-            _parse_cells(current, numeric_line, columns, bool(first))
+            evidence = overrides.get(index, {})
+            override = evidence.get("cells") if evidence.get("line") == line and not unsafe_layout else None
+            _parse_cells(current, numeric_line, columns, bool(first), override)
         except ValueError as error:
             current["errors"].append(str(error))
 

@@ -26,6 +26,8 @@ from urllib.parse import quote, urlparse
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
 from nh_bond_parser import (
+    NHLayoutText,
+    extract_pdf_cell_overrides,
     parse_schedule as parse_nh_schedule,
     validation_errors as nh_bond_validation_errors,
 )
@@ -1580,12 +1582,20 @@ def extract_dart_demand_schedule(text, receipt_date=None, payment_date=None):
 
         time_context = text[match.end():min(len(text), match.end() + 70)]
         time_match = re.search(
-            r"(\d{1,2})(?:시|:\d{2})\s*(?:에서|부터|~|～|-)\s*"
-            r"(\d{1,2})(?:시|:\d{2})",
+            r"(?P<start_hour>\d{1,2})\s*(?:시(?:\s*(?P<start_minute>\d{1,2})\s*분)?|:\s*(?P<start_colon>\d{2}))"
+            r"\s*(?:에서|부터|~|～|-|–)\s*"
+            r"(?P<end_hour>\d{1,2})\s*(?:시(?:\s*(?P<end_minute>\d{1,2})\s*분)?(?!\s*\d{1,2}\s*(?:분|까지|$))|:\s*(?P<end_colon>\d{2}))(?!\d)",
             time_context,
         )
-        start_time = f"{int(time_match.group(1)):02d}:00" if time_match else None
-        end_time = f"{int(time_match.group(2)):02d}:00" if time_match else None
+        start_time, end_time = None, None
+        if time_match:
+            values = [
+                (int(time_match[f"{prefix}_hour"]),
+                 int(time_match[f"{prefix}_minute"] or time_match[f"{prefix}_colon"] or 0))
+                for prefix in ("start", "end")
+            ]
+            if all(0 <= hour < 24 and 0 <= minute < 60 for hour, minute in values) and values[0] < values[1]:
+                start_time, end_time = [f"{hour:02d}:{minute:02d}" for hour, minute in values]
         schedules.append((schedule_date, start_time, end_time))
 
     if not schedules:
@@ -1933,10 +1943,19 @@ def parse_nh_syndication_text(text, reference_date, pdf_url, diagnostics=None):
 
 def extract_nh_syndication_pdf(pdf_content):
     reader = PdfReader(BytesIO(pdf_content))
-    text = "\n\f\n".join(
-        page.extract_text(extraction_mode="layout", layout_mode_space_vertically=False) or ""
-        for page in reader.pages
-    )
+    pages, overrides, offset = [], {}, 0
+    for page in reader.pages:
+        layout = page.extract_text(extraction_mode="layout", layout_mode_space_vertically=False) or ""
+        pages.append(layout)
+        try:
+            page_cells = extract_pdf_cell_overrides(page, layout)
+        except (ValueError, TypeError, KeyError, IndexError):
+            # Unusable geometric evidence leaves the strict text validation in place.
+            page_cells = {}
+        for index, cells in page_cells.items():
+            overrides[offset + index] = cells
+        offset += len(layout.split("\n")) + 1
+    text = NHLayoutText("\n\f\n".join(pages), overrides)
     created_at = None
     try:
         created_at = reader.metadata.creation_date if reader.metadata else None
@@ -2432,7 +2451,7 @@ def fetch_bond_market_data(
                 signatures[filename] = hashlib.sha256(source.read()).hexdigest()[:12]
         except OSError:
             signatures[filename] = "unavailable"
-    logging.info("   [Bond Market] code_revision=2026-10-12-sources-v2 path=%s files=%s reference_date=%s",
+    logging.info("   [Bond Market] code_revision=2026-10-13-sources-v3 path=%s files=%s reference_date=%s",
                  os.path.abspath(__file__), signatures, reference_date)
     interval_seconds = max(1, parse_int_env("BOND_POLL_INTERVAL_SECONDS", 300))
     deadline = parse_bond_poll_deadline(reference_date)
@@ -3253,6 +3272,41 @@ def bond_issuance_names(kofia_result, nh_result, reference_date):
     return categories, supplements
 
 
+def nh_issuance_amount_events(nh_result, reference_date):
+    """Return complete NH issued bundles without altering KOFIA or planned data."""
+    source_date = nh_result.get("source_date")
+    if isinstance(source_date, str):
+        source_date = parse_history_date(source_date)
+    if source_date != reference_date or nh_result.get("status") not in {"ok", "partial"}:
+        return []
+    rejected = {normalize_bond_issuer_key(issue.get("issuer", ""))
+                for issue in nh_result.get("validation_errors", [])}
+    groups = {}
+    for event in nh_result.get("issuance_items", []):
+        if event.get("payment_date") == reference_date:
+            groups.setdefault(bond_event_identity_key(event), []).append(event)
+    result = []
+    for key, events in groups.items():
+        if not key or len(events) != 1:
+            continue
+        event = events[0]
+        issuer = normalize_kofia_issuer(event.get("issuer", ""))
+        if (event.get("source") != "nh_pdf"
+                or not issuer or normalize_bond_issuer_key(issuer) in rejected
+                or "유동화" in issuer
+                or any(word in issuer for word in KOFIA_LOW_SIGNAL_ISSUER_KEYWORDS)
+                or issuer in KOFIA_ROUTINE_POLICY_BANK_ISSUERS
+                or get_bond_exclusion_reason(issuer, 1)
+                or bond_event_validation_errors(event)):
+            continue
+        issued = event.get("issued_tranches") or []
+        total = event.get("issued_amount_eok")
+        if (issued and total is not None
+                and all(tranche.get("amount_eok") is not None for tranche in issued)):
+            result.append(event)
+    return sorted(result, key=lambda event: event["issuer"])
+
+
 def build_bond_market_section(
     bond_market_data,
     reference_date=None,
@@ -3322,6 +3376,17 @@ def build_bond_market_section(
     if nh_issuance_supplements:
         lines.append("※ NH 원문으로 보완한 당일 발행 예정: "
                      + ", ".join(html.escape(name) for name in nh_issuance_supplements))
+    nh_issued_events = nh_issuance_amount_events(nh_result, reference_date)
+    if nh_issued_events:
+        lines.append("※ NH 자료상 발행액 (금투협 확인과 별도):")
+        amount_limit = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
+        for event in nh_issued_events[:amount_limit]:
+            allocation = html.escape(format_bond_history_tranches(event["issued_tranches"]))
+            if len(event["issued_tranches"]) > 1:
+                allocation += f" (합계 {format_eok_amount(event['issued_amount_eok'])})"
+            lines.append(f"- {format_bond_event_link(event)}: {allocation}")
+        if len(nh_issued_events) > amount_limit:
+            lines.append(f"※ NH 발행액 표시 한도로 {len(nh_issued_events) - amount_limit}건 생략")
 
     if not issuance_lines:
         if kofia_result.get("status") == "error":
@@ -3338,7 +3403,7 @@ def build_bond_market_section(
         )
     if pending_issuers:
         lines.append(
-            "※ 발행액 미확인 종목 포함: "
+            "※ 금투협 발행액 미확인 종목 포함: "
             + ", ".join(html.escape(name) for name in dict.fromkeys(pending_issuers))
         )
 

@@ -1,0 +1,9 @@
+{
+  "source": "Actual NH public PDF retrieved 2026-10-13, created 08:02:42 KST; not the morning server cache. Layout and cell evidence are derived from this PDF.",
+  "url": "http://nhisib.kr/syndication/List/회사채발행예정리스트_261013.pdf",
+  "pdf_sha256": "c2f9fe62f32297a9ffe96b737cf398bcdc3bebc688fa22716017897093bbe2bd",
+  "layout_sha256": "9dc0f076e9707bcc62b9155e89c6c63256befa609124c670aa77f7debf1adeaa",
+  "GS_source": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261008000679",
+  "GS_excerpt": "Actual demand schedule clause from the public 2026-10-08 prospectus. Unit test transport/headers and modified scenarios are synthetic.",
+  "GS_excerpt_sha256": "c76dec4ab0bf8510409712c5dc1ced71ec6aa5e645e3509f8571008439303adf"
+}

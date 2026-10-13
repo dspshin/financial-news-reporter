@@ -315,7 +315,7 @@ class NhBondParserTests(unittest.TestCase):
         text, created = main.extract_nh_syndication_pdf(b"%PDF-fake")
         self.assertIn("\n\f\n", text)
         self.assertIsNone(created)
-        pages[0].extract_text.assert_called_once_with(extraction_mode="layout", layout_mode_space_vertically=False)
+        pages[0].extract_text.assert_any_call(extraction_mode="layout", layout_mode_space_vertically=False)
 
 
 class BondMergeSafetyTests(unittest.TestCase):
