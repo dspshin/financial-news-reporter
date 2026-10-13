@@ -2,7 +2,8 @@
 
 import json
 
-from publish_morning_image import save_receipt, sha256, validate_bundle
+from publish_morning_image import save_receipt, sha256
+from image_delivery_edition import validate_bundle
 
 
 MAX_RETRIES = 3

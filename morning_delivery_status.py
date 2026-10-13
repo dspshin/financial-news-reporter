@@ -5,7 +5,9 @@ import json
 from datetime import date, datetime
 from pathlib import Path
 
-from publish_morning_image import ROOT, KST, save_receipt, sha256, validate_bundle
+from publish_morning_image import ROOT, KST, save_receipt, sha256
+from image_delivery_edition import (bundle_edition, kakao_state_name,
+                                    telegram_state_name, validate_bundle)
 
 
 SKIP_REASONS = {"not_logged_in", "reauthentication", "login_unknown",
@@ -56,45 +58,46 @@ def reconcile(folder, root=ROOT, now=None):
     from kakao_morning_state import (delivery_rooms, receipt_path, share_plan, direct_plan,
                                     read_share_batch, share_receipt_path)
     now = now or datetime.now(KST)
-    day = date.fromisoformat(folder.name.removesuffix("-am"))
-    if folder.name != f"{day.isoformat()}-am":
-        raise ValueError("Invalid morning bundle name")
+    day, edition = bundle_edition(folder)
     config = json.loads((root / ".kakao_morning.json").read_text(encoding="utf-8"))
     rooms = delivery_rooms(config, day)
     plan = share_plan(config, day)
     direct = direct_plan(config, day)
+    if edition == "pm" and not direct:
+        raise ValueError("Closing KakaoTalk requires the sequential direct delivery plan")
+    state_root = root / kakao_state_name(folder)
     starts = config.get("room_start_dates", {})
     if not isinstance(starts, dict) or any(room not in rooms for room in starts):
         raise ValueError("Invalid room start dates")
     active = [room for room in rooms if day >= date.fromisoformat(starts.get(room, "1970-01-01"))]
     image_hash = sha256(folder / "briefing.png")
-    paths = list((root / ".morning_image_delivery").glob(f"{folder.name}-*.json"))
+    paths = list((root / telegram_state_name(folder)).glob(f"{folder.name}-*.json"))
     # Multiple destinations/conflicting records require inspection; do not pick a success.
     telegram = (read_record(paths[0], folder, image_hash) if len(paths) == 1 else
                 {"status": "invalid" if paths else "not_started"})
     deliveries = {"telegram": telegram}
     for room in active:
         deliveries[room] = read_record(
-            receipt_path(root / ".morning_kakao_delivery", folder, room), folder, image_hash, room)
+            receipt_path(state_root, folder, room), folder, image_hash, room)
     deferred_rooms = []
     recovery_invalid = False
     if direct:
         from kakao_morning_recovery import read_recovery, valid_deferral
         try:
-            journal = read_recovery(folder, root / ".morning_kakao_delivery")
+            journal = read_recovery(folder, state_root)
             if any(room not in rooms for room in journal["rooms"]):
                 raise ValueError("Unconfigured recovery room")
             for room in active:
                 if deliveries[room]["status"] not in {"sent", "skipped"} and valid_deferral(
-                        journal, room, receipt_path(root / ".morning_kakao_delivery", folder, room)):
+                        journal, room, receipt_path(state_root, folder, room)):
                     deliveries[room] = dict(deliveries[room], deferred=journal["rooms"][room]["deferred"])
                     deferred_rooms.append(room)
         except (OSError, ValueError, TypeError, KeyError):
             recovery_invalid = True
     batch = None
-    if plan and share_receipt_path(root / ".morning_kakao_delivery", folder).exists():
+    if plan and share_receipt_path(state_root, folder).exists():
         try:
-            batch = read_share_batch(folder, root / ".morning_kakao_delivery")
+            batch = read_share_batch(folder, state_root)
             if (batch["source_room"] != plan["source_room"]
                     or any(room not in plan["target_rooms"] for room in batch["rooms"])):
                 raise ValueError("Shared delivery plan mismatch")

@@ -1,10 +1,16 @@
-# 카카오톡 순차 직접 전송 런북
+# 아침·마감 공통 카카오톡 순차 직접 전송 런북
 
 ## 대상과 전송 설정 확인
 
 2026-10-07 이후 새 발행은 **Telegram → 금복회 장자풍도 60대下 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥** 순서로 동일 PNG를 각 방에 직접 첨부한다. 한 방을 sent·허용된 skipped 또는 근거 있는 deferred로 처리한 뒤 다음 방으로 진행한다. 실패한 방 때문에 나머지 방을 중단하지 않으며 **공유 기능·동시 선택·share-begin·share-checkpoint를 사용하지 않는다.** 제작·Telegram·완료 판정은 [발행 런북](MORNING_IMAGE_RUNBOOK.md), 폐기한 방식의 근거는 [과거 이력](MORNING_WORKFLOW_HISTORY.md)에 있다.
 
 `.kakao_morning.json`의 `direct_delivery`는 적용일 2026-10-07, 위 네 방 순서, `max_retries: 3`, `continue_on_room_failure: true`로 설정한다. 기존 `room_names`·`share_delivery`·`room_start_dates`는 과거 묶음 판정을 위해 보존한다. 적용일 이후에는 코드가 direct_delivery를 우선하므로 공유 설정을 삭제하거나 매일 다시 쓰지 않는다. 설정·영수증은 Git에서 제외하며 인증정보를 추가하지 않는다. 과거 묶음은 자동 재개·소급 전송하지 않는다.
+
+## 마감판에 적용할 때
+
+2026-10-13부터 마감판도 같은 네 방 순서·단계·인증·복구 규칙을 적용한다. [마감 제작 런북](CLOSING_IMAGE_RUNBOOK.md)으로 검수와 `publish_closing_image.py` 게시를 마친 뒤, 아래 예시의 **모든 `--bundle`과 이미지 파일 경로를 `output/YYYY-MM-DD-pm`으로 바꾼다.** 오전 이미지는 사용하지 않는다.
+
+공통 `kakao_morning_state.py`·`morning_delivery_status.py`는 bundle의 `-am/-pm`에 맞는 QA와 Telegram 영수증을 선택한다. 오전 기록은 `.morning_kakao_delivery/`, 마감 기록은 `.closing_kakao_delivery/`로 분리한다. `.kakao_morning.json`의 현재 직접 전송 순서만 공유하고 기존 아침 영수증·재시도 횟수는 변경하지 않는다. 마감 완료 검사도 `python3 morning_delivery_status.py check --bundle output/YYYY-MM-DD-pm`을 사용한다. 이전 날짜의 마감판은 소급 전송하지 않는다.
 
 ## 공통 원칙
 

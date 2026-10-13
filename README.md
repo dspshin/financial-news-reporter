@@ -197,12 +197,12 @@ python3 morning_delivery_status.py check --bundle output/YYYY-MM-DD-am
 
 ### Codex 마감 이미지 예약
 
-이 대화에 연결된 **평일 16:10 마감 시황 이미지 제작·텔레그램** 예약(ID: `16-10`)이 활성화되어 있습니다. 시간대는 **Asia/Seoul**이며 **한국 주식시장 개장 평일 16:10 시작·16:20 정보 기준**, 당일 정규장 종가 중심으로 제작합니다. 검수 후 아침판과 같은 일반 Telegram 채널에 게시하고 이 대화에 결과를 제공합니다. 카카오톡·이메일 전송은 포함하지 않습니다.
+이 대화에 연결된 **평일 16:10 마감 시황 이미지 제작·전송** 예약(ID: `16-10`)이 활성화되어 있습니다. 시간대는 **Asia/Seoul**이며 **한국 주식시장 개장 평일 16:10 시작·16:20 정보 기준**, 당일 정규장 종가 중심으로 제작합니다. 검수 후 아침판과 같은 일반 Telegram 채널에 게시하고, 동일 PNG를 **금복회 장자풍도 60대下 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥** 순서로 각각 직접 전송한 뒤 이 대화에 결과를 제공합니다. 카카오톡 공유와 이메일 전송은 포함하지 않습니다.
 
 - [CLOSING_AUTOMATION_PROMPT.md](CLOSING_AUTOMATION_PROMPT.md): 앱에 등록된 최신 실행 프롬프트; 수정 시 앱 예약도 함께 갱신
 - [CLOSING_IMAGE_RUNBOOK.md](CLOSING_IMAGE_RUNBOOK.md): 뉴스 후보 20~30건·중요 원문 10~15건 검토·핵심 이슈 3개, 여섯 패널·출처·시간·아침판과 같은 디자인·검수·사용량 기준
 
-마감 결과는 `output/YYYY-MM-DD-pm/`에 이미지·원고·출처·캡션·QA로 저장합니다. `publish_closing_image.py`는 오전 업로더의 전송 함수를 재사용하며 마감 시간·QA를 별도 검증하고 `.closing_image_delivery/`에 중복 방지 영수증을 저장합니다. `--dry-run` 통과 후 실제 게시하고 `--status`로 sent·message_id를 확인합니다. 미확인 항목은 이미지와 원고에서 통째로 생략하고 기록 파일에 사유를 보관합니다. 오른쪽 상단 인물 표정은 KOSPI 등락 강도와 KOSDAQ 혼조 여부에 맞춥니다. 아침 예약과 산출물은 분리하며, 휴장일은 조용히 종료하고 개장·마감 미확인은 보류합니다. 수급의 집계 범위·잠정 여부와 해외 장중 가격의 실제 관측시각을 구분합니다. 컴퓨터와 Codex 앱이 실행 중이어야 하며 저장소 문서 수정만으로 앱 예약은 자동 변경되지 않습니다.
+마감 결과는 `output/YYYY-MM-DD-pm/`에 이미지·원고·출처·캡션·QA로 저장합니다. `publish_closing_image.py`는 오전 업로더의 전송 함수를 재사용하며 마감 시간·QA를 별도 검증하고 `.closing_image_delivery/`에 중복 방지 영수증을 저장합니다. `--dry-run` 통과 후 실제 게시하고 `--status`로 sent·message_id를 확인합니다. 이후 [공통 카카오톡 런북](KAKAO_MORNING_RUNBOOK.md)의 로그인·단계 확인·복구 최대 3회·실패 방 보류 후 다음 방 진행을 적용합니다. 공통 상태 도구에는 마감 `--bundle output/YYYY-MM-DD-pm`을 지정하며 `.closing_kakao_delivery/`에 영수증과 복구 기록을 분리합니다. 마지막 `morning_delivery_status.py check --bundle output/YYYY-MM-DD-pm`으로 모든 대상 처리를 확인합니다. 미확인 항목은 이미지와 원고에서 통째로 생략하고 기록 파일에 사유를 보관합니다. 오른쪽 상단 인물 표정은 KOSPI 등락 강도와 KOSDAQ 혼조 여부에 맞춥니다. 아침 예약과 산출물은 분리하며, 휴장일은 조용히 종료하고 개장·마감 미확인은 보류합니다. 수급의 집계 범위·잠정 여부와 해외 장중 가격의 실제 관측시각을 구분합니다. 컴퓨터와 Codex 앱이 실행 중이어야 하며 저장소 문서 수정만으로 앱 예약은 자동 변경되지 않습니다.
 
 아침·마감 이미지 모두 달러/원과 엔화(100엔당 원화)의 현재값·직전 기준값을 조회해 검증된 등락률(%)·부호·화살표를 가격 옆에 표시합니다. 현물은 같은 출처·세션의 전 거래일 종가, 은행 매매기준율은 같은 은행의 전 고시일 최종값과 비교하고 실제 비교 날짜를 표시합니다. 비교값을 확인하지 못한 경우만 가격을 남기고 %·화살표를 생략합니다. [공통 출처·계산 기준](MARKET_DATA_SOURCES.md)을 따릅니다.
 
@@ -287,10 +287,11 @@ python list_models.py
 - `publish_morning_image.py`: 검수된 당일 이미지의 Telegram 게시와 중복 방지
 - `publish_closing_image.py`: 마감판 검수·16:20 기준 확인과 같은 Telegram 채널 게시; 오전 전송 함수 재사용
 - `morning_market_day.py`, `test_morning_market_day.py`: 한국 휴장일 사전 검사·당일 공식 개장 확인 검증과 테스트
-- `KAKAO_MORNING_RUNBOOK.md`: Telegram 발행 성공 후 수행하는 카카오톡 이미지 전송 절차
+- `KAKAO_MORNING_RUNBOOK.md`: 아침·마감 Telegram 발행 성공 후 수행하는 공통 카카오톡 직접 전송 절차
 - `kakao_morning_state.py`, `test_kakao_morning_state.py`: 카카오톡 UI 전송 기록·중복 방지와 테스트
 - `kakao_morning_recovery.py`, `test_kakao_morning_recovery.py`: 재시도 3회 한도·보류 기록·다음 방 진행 검증
-- `.kakao_morning.json`, `.morning_kakao_delivery/`: 카카오톡 대상 방 설정과 전송 기록 (Git 제외)
+- `image_delivery_edition.py`, `test_closing_kakao_delivery.py`: 오전·마감 QA와 영수증 분리 및 마감 카카오톡 전송 검증
+- `.kakao_morning.json`, `.morning_kakao_delivery/`, `.closing_kakao_delivery/`: 공통 카카오톡 대상 설정과 발행판별 전송 기록 (Git 제외)
 - `test_read_morning_news.py`, `test_publish_morning_image.py`: 뉴스 시간 필터와 이미지 게시 검증 테스트
 - `output/YYYY-MM-DD-am/`: 날짜별 뉴스 참고자료·원고·출처·이미지·검수 결과
 - `.morning_image_delivery/`: 이미지 전송 상태와 메시지 ID (Git 제외)

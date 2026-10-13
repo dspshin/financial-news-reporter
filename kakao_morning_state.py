@@ -7,7 +7,8 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 
-from publish_morning_image import KST, ROOT, save_receipt, sha256, validate_bundle
+from publish_morning_image import KST, ROOT, save_receipt, sha256
+from image_delivery_edition import bundle_edition, kakao_state_name, validate_bundle
 
 
 def receipt_path(state_root, folder, room):
@@ -224,6 +225,14 @@ def require_previous_rooms(folder, state_root, previous_rooms, allow_deferred=Fa
 
 
 def require_telegram_success(folder):
+    if bundle_edition(folder)[1] == "pm":
+        from publish_closing_image import STATE_NAME, delivery_status
+        state_root = ROOT / STATE_NAME
+        # PM must have one valid receipt for this image. A sent AM image or a
+        # conflicting PM record cannot authorize another edition's UI send.
+        if delivery_status(folder, state_root)["status"] != "sent":
+            raise ValueError("Send this reviewed closing image to Telegram before KakaoTalk")
+        return next(state_root.glob(f"{folder.name}-*.json")).name
     image_hash = sha256(folder / "briefing.png")
     for path in (ROOT / ".morning_image_delivery").glob(f"{folder.name}-*.json"):
         try:
@@ -372,11 +381,13 @@ def main():
     now = datetime.now(KST)
     folder = (args.bundle or ROOT / "output" / f"{now.date().isoformat()}-am").resolve()
     config = json.loads((ROOT / ".kakao_morning.json").read_text(encoding="utf-8"))
-    day = date.fromisoformat(folder.name.removesuffix("-am"))
+    day, edition = bundle_edition(folder)
     rooms = delivery_rooms(config, day)
     plan = share_plan(config, day)
     direct = direct_plan(config, day)
-    state_root = ROOT / ".morning_kakao_delivery"
+    if edition == "pm" and not direct:
+        raise ValueError("Closing KakaoTalk requires the sequential direct delivery plan")
+    state_root = ROOT / kakao_state_name(folder)
     if args.action in {"share-begin", "share-checkpoint"}:
         if args.room is not None or not plan:
             raise ValueError("Use --share-room and an active shared delivery plan")
