@@ -107,8 +107,7 @@ class ActualNhLayoutTests(unittest.TestCase):
         data = market_data()
         data["nh"] = result
         section = main.build_bond_market_section(data)
-        self.assertIn("회사채</b>: 현대트랜시스", section)
-        self.assertIn("NH 원문으로 보완한 당일 발행 예정", section)
+        self.assertIn("회사채</b>: 현대트랜시스 (NH 예정)", section)
 
     def test_pdf_title_date_mismatch_is_not_treated_as_fresh(self):
         response = Mock(status_code=200, content=b"%PDF-fixture")
@@ -158,7 +157,7 @@ class BondScheduleCoverageTests(unittest.TestCase):
         section = main.build_bond_market_section(market_data())
         self.assertIn("[ 금일 수요예측 일정 ]", section)
         self.assertIn("확인된 수요예측 일정 없음", section)
-        self.assertIn("메일 본문에만 있는 입찰 일정은 포함되지 않습니다", section)
+        self.assertNotIn("메일 본문에만 있는 입찰 일정은 포함되지 않습니다", section)
         self.assertNotIn("[ 금일 주요 일정 ]", section)
         self.assertNotIn("당일 원문 입력 필요", section)
         self.assertNotIn("\n- 없음\n", section)
@@ -184,6 +183,8 @@ class BondScheduleCoverageTests(unittest.TestCase):
         data["nh"]["validation_errors"] = [{"issuer": "롯데리츠", "errors": ["incomplete continuation"]}]
         section = main.build_bond_market_section(data)
         self.assertIn("일정 확인 불가", section)
+        self.assertIn("NH 예정표 일부 조건 확인 중", section)
+        self.assertNotIn("이력 갱신", section)
         self.assertNotIn("확인된 수요예측 일정 없음", section)
         digest = main.prepare_bond_schedule_digest(data, main.build_bond_history_state(), REFERENCE)
         self.assertFalse(digest["reliable"])

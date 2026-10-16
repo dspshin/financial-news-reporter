@@ -870,6 +870,13 @@ class FetchStatusTests(unittest.TestCase):
         )
         self.assertIn("뉴스 수집 장애", briefing)
         self.assertNotIn("신규 채택 뉴스 없음", briefing)
+        pef_briefing = main.generate_briefing(
+            {}, "", target="pef", briefing_date=date(2026, 7, 23), fetch_status=status
+        )
+        self.assertIn("뉴스 유무를 확인할 수 없습니다", pef_briefing)
+        self.assertNotIn("신규 뉴스 없음", pef_briefing)
+        self.assertNotIn("RSS", pef_briefing)
+        self.assertNotIn("재실행", pef_briefing)
 
     @patch("main.scrape_article_content", return_value="irrelevant body")
     @patch("main.parse_google_news_feed")
@@ -937,7 +944,9 @@ class FetchStatusTests(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertTrue(main.is_content_fetch_outage(status))
         self.assertIn("기사 본문 수집 장애", briefing)
-        self.assertNotIn("신규 채택 뉴스 없음", briefing)
+        self.assertNotIn("신규 뉴스 없음", briefing)
+        self.assertNotIn("원문 URL 해석", briefing)
+        self.assertNotIn("재실행", briefing)
 
     @patch.dict(
         "os.environ",
@@ -1154,6 +1163,27 @@ class PefBriefingFormatTests(unittest.TestCase):
         self.assertNotIn("Day-1", briefing)
         self.assertNotIn("TSA", briefing)
         self.assertNotIn("관심 기업 뉴스 레이더", briefing)
+        self.assertIn("신규 뉴스 없음", briefing)
+        self.assertNotIn("중복 제거", briefing)
+        self.assertNotIn("필터 적용", briefing)
+        self.assertNotIn("기사 재사용", briefing)
+        self.assertNotIn("GP Action", briefing)
+
+    def test_no_news_with_partial_coverage_retains_limitation_and_market_data(self):
+        status = main.new_fetch_status("pef")
+        status.update({"queries_attempted": 2, "queries_succeeded": 1, "queries_failed": 1})
+        briefing = main.generate_briefing(
+            {"KOSPI": {"price": 3000, "change": 30, "pct_change": 1}},
+            "",
+            target="pef",
+            briefing_date=date(2026, 7, 23),
+            fetch_status=status,
+        )
+        self.assertIn("신규 뉴스 없음", briefing)
+        self.assertIn("일부 뉴스 확인 불가", briefing)
+        self.assertIn("확인된 범위에 한합니다", briefing)
+        self.assertIn("KOSPI: 3,000.00 (🔺 1.00%)", briefing)
+        self.assertNotIn("GP Action", briefing)
 
     @patch.dict(
         "os.environ",
@@ -1164,36 +1194,42 @@ class PefBriefingFormatTests(unittest.TestCase):
         clear=False,
     )
     @patch("main.genai.Client")
-    def test_watchlist_prompt_section_is_added_only_for_watchlist_articles(
+    def test_optional_news_sections_require_matching_articles(
         self,
         mock_client,
     ):
         generate_content = mock_client.return_value.models.generate_content
         generate_content.return_value = SimpleNamespace(text="<b>briefing</b>")
 
-        main.generate_briefing(
-            {},
-            "Title: 일반 PEF 기사\nContent: 일반 기사 본문",
-            target="pef",
-            briefing_date=date(2026, 8, 8),
-        )
-        main.generate_briefing(
-            {},
-            (
-                "--- WATCHLIST ARTICLE START ---\n"
-                "Watchlist Company: 모토닉\n"
-                "Title: 모토닉 신규 사업\n"
-                "--- WATCHLIST ARTICLE END ---"
-            ),
-            target="pef",
-            briefing_date=date(2026, 8, 8),
-        )
-
-        regular_prompt = generate_content.call_args_list[0].kwargs["contents"]
-        watchlist_prompt = generate_content.call_args_list[1].kwargs["contents"]
-        self.assertNotIn("관심 기업 뉴스 레이더", regular_prompt)
-        self.assertIn("관심 기업 뉴스 레이더", watchlist_prompt)
-        self.assertIn("Watchlist Company: 모토닉", watchlist_prompt)
+        for watchlist, firm_mention, partial in (
+            (False, False, False), (True, False, False), (False, True, False), (True, True, True),
+        ):
+            with self.subTest(watchlist=watchlist, firm_mention=firm_mention, partial=partial):
+                context = "Title: 일반 PEF 기사\nContent: 일반 기사 본문"
+                if watchlist:
+                    context += (
+                        "\n--- WATCHLIST ARTICLE START ---\n"
+                        "Watchlist Company: 모토닉\n"
+                        "Title: 모토닉 신규 사업\n"
+                        "--- WATCHLIST ARTICLE END ---"
+                    )
+                if firm_mention:
+                    context += (
+                        "\n--- FIRM MENTION ARTICLE START ---\n"
+                        "Title: Baikal Investment 관련 거래\n"
+                        "--- FIRM MENTION ARTICLE END ---"
+                    )
+                main.generate_briefing(
+                    {}, context, target="pef", briefing_date=date(2026, 8, 8),
+                    fetch_status={"queries_succeeded": 1, "queries_failed": 1} if partial else None,
+                )
+                prompt = generate_content.call_args.kwargs["contents"]
+                self.assertEqual("관심 기업 뉴스 레이더" in prompt, watchlist)
+                self.assertEqual("언급 뉴스/회사명 레이더" in prompt, firm_mention)
+                self.assertEqual("일부 뉴스 확인 불가" in prompt, partial)
+                self.assertNotIn("금일 수집 기준 직접 언급 뉴스 없음", prompt)
+                if watchlist:
+                    self.assertIn("Watchlist Company: 모토닉", prompt)
 
 
 class BondMarketTests(unittest.TestCase):

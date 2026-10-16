@@ -191,7 +191,7 @@ class NhBondParserTests(unittest.TestCase):
         self.assertIsNone(digest["next_history"])
         self.assertFalse(main.bond_sources_ready({"status": "ok", "items": [{}]}, nh, self.reference))
         section = main.build_bond_market_section(data, schedule_digest=digest)
-        self.assertIn("검증 실패", section)
+        self.assertIn("NH 예정표 일부 조건 확인 중", section)
         self.assertIn("롯데리츠", section)
         self.assertNotIn("불량회사", section)
         self.assertNotIn("[변경]", section)

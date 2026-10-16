@@ -3366,19 +3366,19 @@ def build_bond_market_section(
             parse_int_env("BOND_KOFIA_MAX_ISSUERS_PER_CATEGORY", 8),
         )
         visible_names = names[:max_issuers]
-        issuer_text = ", ".join(html.escape(name) for name in visible_names)
+        issuer_text = ", ".join(
+            html.escape(name) + (" (NH 예정)" if name in nh_issuance_supplements else "")
+            for name in visible_names
+        )
         if len(names) > max_issuers:
             issuer_text += f", 외 {len(names) - max_issuers}개"
         lines.append(
             f"- <b>{category_labels[category]}</b>: {issuer_text}"
         )
         issuance_lines += 1
-    if nh_issuance_supplements:
-        lines.append("※ NH 원문으로 보완한 당일 발행 예정: "
-                     + ", ".join(html.escape(name) for name in nh_issuance_supplements))
     nh_issued_events = nh_issuance_amount_events(nh_result, reference_date)
     if nh_issued_events:
-        lines.append("※ NH 자료상 발행액 (금투협 확인과 별도):")
+        lines.append("※ 발행액 (NH 기준):")
         amount_limit = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
         for event in nh_issued_events[:amount_limit]:
             allocation = html.escape(format_bond_history_tranches(event["issued_tranches"]))
@@ -3386,7 +3386,7 @@ def build_bond_market_section(
                 allocation += f" (합계 {format_eok_amount(event['issued_amount_eok'])})"
             lines.append(f"- {format_bond_event_link(event)}: {allocation}")
         if len(nh_issued_events) > amount_limit:
-            lines.append(f"※ NH 발행액 표시 한도로 {len(nh_issued_events) - amount_limit}건 생략")
+            lines.append(f"※ 발행액 {len(nh_issued_events) - amount_limit}건 생략")
 
     if not issuance_lines:
         if kofia_result.get("status") == "error":
@@ -3416,11 +3416,9 @@ def build_bond_market_section(
     )
     if not today_events:
         if not demand_complete:
-            lines.append("- 일정 확인 불가 (자료 미확인 또는 검증 불완전)")
+            lines.append("- 일정 확인 불가")
         else:
             lines.append("- 확인된 수요예측 일정 없음")
-    lines.append("※ NH 메일 본문에만 있는 입찰 일정은 포함되지 않습니다.")
-
     if nh_result.get("status") == "stale":
         source_date = nh_result.get("source_date")
         if isinstance(source_date, str):
@@ -3438,9 +3436,9 @@ def build_bond_market_section(
         or nh_result.get("validation_errors")
         or any(not nh_bond_event_reliable(event) for event in nh_result.get("items", []))
     ):
-        lines.append("※ NH 예정표 일부 조건 검증 실패: 해당 종목 조건 확인 중, 조건 비교·이력 갱신 보류")
+        lines.append("※ NH 예정표 일부 조건 확인 중")
     elif any(bond_event_validation_errors(event) for event in demand_events):
-        lines.append("※ 병합 조건 검증 실패: 해당 종목 조건 확인 중, 조건 비교·이력 갱신 보류")
+        lines.append("※ 일부 채권 조건 확인 중")
 
     max_details = max(1, parse_int_env("BOND_NH_MAX_DETAILS", 10))
     digest_reliable = (
@@ -3489,7 +3487,7 @@ def build_bond_market_section(
             )
         if len(detail_entries) > max_details:
             lines.append(
-                f"※ 상세 표시 한도로 {len(detail_entries) - max_details}건 생략"
+                f"※ 일정 상세 {len(detail_entries) - max_details}건 생략"
             )
 
         unchanged_events = schedule_digest.get("unchanged_events", [])
@@ -4562,17 +4560,15 @@ def build_no_new_articles_briefing(
     if target == "pef":
         pef_context = get_pef_persona_config()
         firm_name = pef_context["firm_name"]
+        if partial_warning:
+            partial_warning = "\n- 일부 뉴스 확인 불가: 확인된 범위에 한합니다."
         return f"""<b>👔 {today} {firm_name} GP 인사이트 브리핑{kr_holiday_text}</b>
 
-<b>📭 신규 채택 뉴스 없음</b>
-- 중복 제거 및 PEF 필터 적용 결과, 오늘 새로 브리핑할 PEF/{firm_name} 관련 기사는 없습니다.{partial_warning}
-- 기존 기사 재사용 없이 시장 데이터와 내부 점검 액션만 간단히 확인합니다.
+<b>📭 신규 뉴스 없음</b>
+- 오늘 새로 확인된 PEF/{firm_name} 관련 뉴스가 없습니다.{partial_warning}
 
 <b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
-{market_snapshot}
-
-<b>🎯 오늘/이번 주 핵심 액션</b>
-- <b>GP Action</b>: 진행 중인 딜/포트폴리오의 기존 업데이트와 미확인 데이터만 재점검."""
+{market_snapshot}"""
 
     return f"""<b>📊 {today} 시장 브리핑{kr_holiday_text}</b>
 
@@ -4599,20 +4595,26 @@ def build_news_collection_failure_briefing(
     if target == "pef":
         persona = get_pef_persona_config()
         header = f"👔 {today} {persona['firm_name']} GP 브리핑"
+        notice = "- 뉴스 수집에 실패해 오늘의 뉴스 유무를 확인할 수 없습니다."
+        recovery_section = ""
     else:
         header = f"📊 {today} 시장 브리핑"
+        notice = (
+            "- 모든 뉴스 RSS 요청이 실패해 오늘의 뉴스 유무를 확인할 수 없습니다.\n"
+            '- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 뉴스 기반 분석과 투자 판단은 보류합니다.'
+        )
+        recovery_section = """
+
+<b>🎯 대응</b>
+- RSS 연결 상태를 확인한 뒤 재실행하고, 복구 전에는 시장 데이터만 참고합니다."""
 
     return f"""<b>{header}{kr_holiday_text}</b>
 
 <b>⚠️ 뉴스 수집 장애</b>
-- 모든 뉴스 RSS 요청이 실패해 오늘의 뉴스 유무를 확인할 수 없습니다.
-- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 뉴스 기반 분석과 투자 판단은 보류합니다.
+{notice}
 
 <b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
-{market_snapshot}
-
-<b>🎯 대응</b>
-- RSS 연결 상태를 확인한 뒤 재실행하고, 복구 전에는 시장 데이터만 참고합니다."""
+{market_snapshot}{recovery_section}"""
 
 
 def build_article_content_failure_briefing(
@@ -4627,20 +4629,26 @@ def build_article_content_failure_briefing(
     if target == "pef":
         persona = get_pef_persona_config()
         header = f"👔 {today} {persona['firm_name']} GP 브리핑"
+        notice = "- 기사 본문을 확인하지 못해 뉴스 요약을 제공할 수 없습니다."
+        recovery_section = ""
     else:
         header = f"📊 {today} 시장 브리핑"
+        notice = (
+            "- 뉴스 후보는 검색됐지만 원문 URL 해석 또는 기사 본문 추출이 모두 실패했습니다.\n"
+            '- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 불완전한 제목만으로 요약하지 않습니다.'
+        )
+        recovery_section = """
+
+<b>🎯 대응</b>
+- Google News 원문 URL 해석 및 언론사 본문 접근 상태를 확인한 뒤 재실행합니다."""
 
     return f"""<b>{header}{kr_holiday_text}</b>
 
 <b>⚠️ 기사 본문 수집 장애</b>
-- 뉴스 후보는 검색됐지만 원문 URL 해석 또는 기사 본문 추출이 모두 실패했습니다.
-- 따라서 "신규 뉴스 없음"으로 판단하지 않으며, 불완전한 제목만으로 요약하지 않습니다.
+{notice}
 
 <b>📊 시장 데이터 체크 ({get_market_period_label(market_data)})</b>
-{market_snapshot}
-
-<b>🎯 대응</b>
-- Google News 원문 URL 해석 및 언론사 본문 접근 상태를 확인한 뒤 재실행합니다."""
+{market_snapshot}{recovery_section}"""
 
 # --- Summarizer Module ---
 def generate_briefing(
@@ -4714,10 +4722,16 @@ def generate_briefing(
         return "Error: GEMINI_API_KEY not found in environment variables."
 
     if is_partial_fetch_failure(fetch_status):
+        coverage_instruction = (
+            "State the coverage limitation once, briefly, as '일부 뉴스 확인 불가'. "
+            "Do not include collection diagnostics or troubleshooting instructions."
+            if target == "pef"
+            else "Explicitly state that coverage was partial."
+        )
         news_context = (
             "## NEWS COLLECTION WARNING\n"
-            "Some RSS queries failed. Base the report only on the articles below and explicitly "
-            "state that coverage was partial.\n\n"
+            "Some RSS queries failed. Base the report only on the articles below. "
+            + coverage_instruction + "\n\n"
             + news_context
         )
 
@@ -4887,6 +4901,18 @@ def generate_briefing(
             watchlist_instruction = """
     - **Watchlist radar**: Use only articles marked "WATCHLIST ARTICLE" in the watchlist section. Group them by the supplied Watchlist Company name, keep facts separate from GP implications, and do not infer Baikal's intent or participation.
     """
+        firm_mention_section = ""
+        firm_mention_instruction = ""
+        if "--- FIRM MENTION ARTICLE START ---" in (news_context or ""):
+            firm_mention_section = f"""
+    <b>🧭 {firm_name} 언급 뉴스/회사명 레이더</b>
+    - (직접 언급 기사에 등장한 회사/기관/인물을 1-3개만 리스트업하고 {firm_name} 관점의 의미를 한 줄로 정리)
+
+    ---
+            """
+            firm_mention_instruction = f"""
+    - **Firm mention radar**: Use only articles marked "FIRM MENTION ARTICLE" for the {firm_name} mention/news radar. Extract concrete company, institution, or person names from those articles. Do not invent names.
+    """
         prompt_content = f"""
     <b>👔 {today} {firm_name} GP 인사이트 브리핑{kr_holiday_text}</b>
     
@@ -4918,16 +4944,11 @@ def generate_briefing(
     
     ---
     {watchlist_section}
-    
-    <b>🧭 {firm_name} 언급 뉴스/회사명 레이더</b>
-    - (FIRM MENTION ARTICLE이 있으면, 기사에 등장한 회사/기관/인물을 1-3개만 리스트업하고 {firm_name} 관점의 의미를 한 줄로 정리)
-    - (직접 언급 뉴스가 없으면 "금일 수집 기준 직접 언급 뉴스 없음"으로 짧게 처리)
-    
-    ---
+    {firm_mention_section}
 
     <b>🎯 오늘/이번 주 핵심 액션 플랜</b>
     <b>GP Action</b>
-    - (투자팀이 오늘 확인/실행할 일 1-2개)
+    - (기사 근거가 있는 구체적 확인/실행 사항 1-2개. 실질적인 액션이 없으면 이 섹션 생략)
         """
         role_description = (
             f"You are the internal morning-briefing writer for {firm_name}, a Korea-focused private equity GP.\n"
@@ -4937,8 +4958,10 @@ def generate_briefing(
         specific_instructions = f"""
     - **Perspective**: Prioritize implications for sourcing, underwriting, financing, exit, and portfolio value creation.
     {watchlist_instruction}
-    - **Firm mention radar**: Use only articles marked "FIRM MENTION ARTICLE" for the {firm_name} mention/news radar. Extract concrete company, institution, or person names from those articles. Do not invent names.
+    {firm_mention_instruction}
     - **Tone**: Avoid generic consultant language. Be concise, specific, and action-oriented for {firm_name}.
+    - **Editorial focus**: Omit empty sections and routine "no relevant news" placeholders. Include GP judgments and actions only when supported by specific article facts; omit generic advice to monitor or recheck. Avoid repeating the same point across sections.
+    - **Reader notices**: Omit internal processing and system-operation notices (collection mechanics, deduplication, filtering, parser validation, history updates, troubleshooting). Retain material source dates, unavailable data, partial coverage, and uncertainty, stated briefly once where relevant. Do not mistake a collection failure for no news.
     - **Evidence**: Use actual facts from the articles, and separate confirmed facts from inference when needed.
     - **Decision discipline**: Do not turn a single article or a daily market move into a firm investment conclusion. State uncertainty and the missing evidence.
     - **Length**: Keep the full briefing concise enough for one Telegram message when possible.
@@ -5665,7 +5688,7 @@ def main():
     
     pef_links_message = build_news_links_message(
         pef_source_links,
-        title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 수집 뉴스 링크",
+        title=f"🔗 PEF 및 {pef_context['firm_name']} 관련 뉴스 원문",
         cluster_events=True,
     )
     watchlist_links_message = build_watchlist_links_message(watchlist_links)

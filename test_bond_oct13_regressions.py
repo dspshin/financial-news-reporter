@@ -199,7 +199,7 @@ class IssuedAmountDisplayTests(unittest.TestCase):
         self.assertIn("2년 2,600억원 / 3년 2,400억원 (합계 5,000억원)", section)
         self.assertIn("JB금융지주(신종)", section)
         self.assertIn("99NC5 1,000억원", section)
-        self.assertIn("NH 자료상 발행액 (금투협 확인과 별도)", section)
+        self.assertIn("발행액 (NH 기준)", section)
         self.assertIn("금투협 발행액 미확인", section)
         self.assertEqual(current, before)
         event = next(e for e in current["nh"]["issuance_items"] if e["issuer"] == "한국투자금융지주")
