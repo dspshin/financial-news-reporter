@@ -171,11 +171,13 @@ ARTICLE_CONTENT_MAX_CHARS=2000
 | --- | --- |
 | [MORNING_AUTOMATION_PROMPT.md](MORNING_AUTOMATION_PROMPT.md) | 짧은 예약 진입점; 수정 시 앱의 기존 예약도 함께 갱신 |
 | [MORNING_IMAGE_RUNBOOK.md](MORNING_IMAGE_RUNBOOK.md) | 발행 조건·여섯 패널·디자인·대조 검수·Telegram·사용량 보고 |
-| [MARKET_DATA_SOURCES.md](MARKET_DATA_SOURCES.md) | KRX 야간선물·NDF·WTI·국채·엔화의 출처와 월물·관측·비교 기준 |
+| [MARKET_DATA_SOURCES.md](MARKET_DATA_SOURCES.md) | 한국투자증권 야간 API·대체 KRX·NDF·WTI·국채·엔화의 출처와 월물·관측·비교 기준 |
 | [KAKAO_MORNING_RUNBOOK.md](KAKAO_MORNING_RUNBOOK.md) | 직접 첨부·단계 영수증·로그인 조건·화면 오류와 중단 복구 |
 | [MORNING_WORKFLOW_HISTORY.md](MORNING_WORKFLOW_HISTORY.md) | 폐기한 방식·과거 조회 검증, 매일 읽지 않는 기록 |
 
 규칙은 담당 런북에서 관리하고 예약 프롬프트와 README에 상세 절차를 중복하지 않습니다. 저장소 프롬프트를 수정해도 앱 예약은 자동 변경되지 않습니다.
+
+야간선물은 `python3 read_kis_night_futures.py --bundle output/YYYY-MM-DD-am`으로 한국투자증권 OpenAPI를 우선 조회합니다. stock idea1의 외부 인증을 재사용하고, 야간 `CM` 종가와 동일 월물의 직전 주간 `F` 종가를 검증해 등락률을 계산합니다. 최초 결과·실제 조회시각·07:35 검증 여부는 `kis-night-futures.json`에 보존하며, 실패 시 출처 런북의 KRX 이하 대체 경로를 사용합니다. 자세한 인증·시간·검증 기준은 출처 런북에서 관리합니다.
 
 아침판 진행자의 표정·시선·자세·분위기는 밤사이 미국 증시의 등락 강도와 혼조 여부, 확인된 야간선물·해외 한국 ETF의 신호에 맞춰 바꿉니다. 캐릭터의 외형과 전문적인 톤은 유지하며, 한국장 개장 결과를 미리 단정하지 않습니다. 구체적인 구간과 검수 기록은 제작 런북에서 관리합니다.
 
