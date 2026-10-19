@@ -622,7 +622,30 @@ def load_pef_watchlist(path=None):
             if isinstance(alias, str) and normalize_whitespace(alias)
         ]
         aliases = list(dict.fromkeys([name] + aliases))
-        normalized_items.append({"name": name, "aliases": aliases})
+        company = {"name": name, "aliases": aliases}
+        invalid_keywords = False
+        for field in ("context_keywords", "exclude_keywords"):
+            raw_keywords = raw_item.get(field, [])
+            if not isinstance(raw_keywords, list):
+                logging.warning(f"   [Watchlist] Invalid {field} for {name}; company skipped.")
+                invalid_keywords = True
+                break
+            keywords = list(dict.fromkeys(
+                normalize_whitespace(keyword)
+                for keyword in raw_keywords
+                if isinstance(keyword, str) and normalize_whitespace(keyword)
+            ))
+            if raw_keywords and not keywords:
+                logging.warning(f"   [Watchlist] Empty {field} for {name}; company skipped.")
+                invalid_keywords = True
+                break
+            if keywords:
+                company[field] = keywords
+        if invalid_keywords:
+            continue
+        if raw_item.get("exact_name_match") is True:
+            company["exact_name_match"] = True
+        normalized_items.append(company)
         seen_names.add(name.lower())
 
     logging.info(
@@ -3989,6 +4012,7 @@ def fetch_news(
     initial_seen_links=None,
     news_history=None,
     collected_date=None,
+    watchlist=None,
 ):
     """
     Fetches top economic news using Google News RSS with specific search queries
@@ -4089,6 +4113,10 @@ def fetch_news(
                 
                 logging.info(f"   - Processing: {entry.title}")
                 if target == "pef":
+                    exclusion = watchlist_exclusion_reason(entry.title, None, watchlist)
+                    if exclusion:
+                        logging.info(f"   [PEF Filter] REJECT before body fetch: {exclusion}")
+                        continue
                     headline_candidate = get_pef_headline_candidate_hits(
                         entry.title,
                         specialist_query=specialist_query,
@@ -4117,6 +4145,10 @@ def fetch_news(
                 
                 pef_meta = None
                 if target == "pef":
+                    exclusion = watchlist_exclusion_reason(entry.title, content, watchlist)
+                    if exclusion:
+                        logging.info(f"   [PEF Filter] REJECT: {exclusion}")
+                        continue
                     pef_meta = evaluate_pef_article(
                         entry.title,
                         entry.link,
@@ -4206,7 +4238,9 @@ def fetch_news(
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
 
-def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=None, collected_date=None):
+def fetch_firm_mention_news(
+    firm_name, initial_seen_links=None, news_history=None, collected_date=None, watchlist=None,
+):
     """
     Fetches recent news that directly mentions the GP name.
     This runs separately from the PEF filter so firm mentions are not lost.
@@ -4276,6 +4310,10 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                 # again through another firm-name query in the same run.
                 seen_links.add(entry.link)
                 seen_titles.add(title_key)
+                exclusion = watchlist_exclusion_reason(entry.title, None, watchlist)
+                if exclusion:
+                    logging.info(f"      [Firm Mention] REJECT before body fetch: {exclusion}")
+                    continue
                 logging.info(f"   - Firm mention candidate: {entry.title}")
                 original_link = entry.link
                 scrape_result = coerce_scrape_result(
@@ -4298,6 +4336,10 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
                     )
                     continue
                 searchable_text = normalize_text(entry.title, content, entry.link)
+                exclusion = watchlist_exclusion_reason(entry.title, content, watchlist)
+                if exclusion:
+                    logging.info(f"      [Firm Mention] REJECT: {exclusion}")
+                    continue
                 is_match, match_reason = match_firm_mention(searchable_text, match_terms, firm_name)
                 if not is_match:
                     logging.info(f"      [Firm Mention] REJECT: {match_reason}")
@@ -4341,16 +4383,60 @@ def fetch_firm_mention_news(firm_name, initial_seen_links=None, news_history=Non
     return combined_news_context, collected_links, seen_links, pending_articles, fetch_status
 
 
-def watchlist_company_matches(searchable_text, aliases):
-    compact_text = re.sub(r"\s+", "", searchable_text or "")
+def watchlist_company_matches(
+    searchable_text, aliases, context_keywords=None, exact_name_match=False,
+):
+    """Match a company mention, optionally requiring nearby identifying context."""
+    searchable_text = normalize_text(searchable_text)
+    compact_keywords = [
+        re.sub(r"\s+", "", normalize_text(keyword))
+        for keyword in (context_keywords or [])
+        if normalize_whitespace(keyword)
+    ]
+    word_chars = "0-9a-z가-힣"
+    particles = "|".join(re.escape(particle) for particle in KOREAN_PARTICLE_SUFFIXES)
     for alias in aliases:
-        normalized_alias = normalize_text(alias)
-        if normalized_alias and normalized_alias in searchable_text:
-            return True
-        compact_alias = re.sub(r"\s+", "", normalized_alias)
-        if compact_alias and compact_alias in compact_text:
-            return True
+        compact_alias = re.sub(r"\s+", "", normalize_text(alias))
+        if not compact_alias:
+            continue
+        alias_pattern = r"\s*".join(re.escape(char) for char in compact_alias)
+        if exact_name_match:
+            # Allow Korean particles (동보는/동보의), but reject longer names
+            # such as 동보건설 even if the article also mentions automobiles.
+            alias_pattern = (
+                rf"(?<![{word_chars}]){alias_pattern}"
+                rf"(?=$|[^{word_chars}]|(?:{particles})(?=$|[^{word_chars}]))"
+            )
+        for match in re.finditer(alias_pattern, searchable_text):
+            if not compact_keywords:
+                return True
+            nearby_text = re.sub(
+                r"\s+", "", searchable_text[max(0, match.start() - 160):match.end() + 160],
+            )
+            if any(keyword in nearby_text for keyword in compact_keywords):
+                return True
     return False
+
+
+def watchlist_exclusion_reason(title, content, watchlist):
+    """Apply exclusions only when the configured company is mentioned."""
+    searchable_text = normalize_text(title, content)
+    compact_text = re.sub(r"\s+", "", searchable_text)
+    for company in watchlist or []:
+        exclude_keywords = company.get("exclude_keywords") or []
+        if not exclude_keywords:
+            continue
+        if not watchlist_company_matches(
+            searchable_text, company.get("aliases") or [company["name"]],
+            context_keywords=company.get("context_keywords"),
+            exact_name_match=company.get("exact_name_match", False),
+        ):
+            continue
+        for keyword in exclude_keywords:
+            compact_keyword = re.sub(r"\s+", "", normalize_text(keyword))
+            if compact_keyword and compact_keyword in compact_text:
+                return f"{company['name']}: excluded topic ({keyword})"
+    return None
 
 
 def fetch_watchlist_news(
@@ -4383,6 +4469,8 @@ def fetch_watchlist_news(
     for company in watchlist:
         company_name = company["name"]
         aliases = company.get("aliases") or [company_name]
+        context_keywords = company.get("context_keywords") or []
+        exclude_keywords = company.get("exclude_keywords") or []
         company_links = 0
         attempted_links = set()
         accepted_event_titles = []
@@ -4390,7 +4478,12 @@ def fetch_watchlist_news(
         for alias in aliases:
             if company_links >= max_per_company:
                 break
-            rss_query = f'"{alias}" when:{lookback_days}d'
+            rss_query = f'"{alias}"'
+            if context_keywords:
+                context_query = " OR ".join(f'"{keyword}"' for keyword in context_keywords)
+                rss_query += f" ({context_query})"
+            rss_query += "".join(f' -"{keyword}"' for keyword in exclude_keywords)
+            rss_query += f" when:{lookback_days}d"
             fetch_status["queries_attempted"] += 1
             try:
                 response = requests.get(
@@ -4414,6 +4507,11 @@ def fetch_watchlist_news(
                     if entry.link in seen_links or entry.link in attempted_links:
                         continue
                     attempted_links.add(entry.link)
+
+                    exclusion = watchlist_exclusion_reason(entry.title, None, watchlist)
+                    if exclusion:
+                        logging.info(f"      [Watchlist] REJECT before body fetch: {exclusion}")
+                        continue
 
                     skip_article, skip_reason, _title_key = should_skip_seen_article(
                         entry,
@@ -4450,9 +4548,17 @@ def fetch_watchlist_news(
                         )
                         continue
                     searchable_text = normalize_text(entry.title, content)
-                    if not watchlist_company_matches(searchable_text, aliases):
+                    exclusion = watchlist_exclusion_reason(entry.title, content, watchlist)
+                    if exclusion:
+                        logging.info(f"      [Watchlist] REJECT: {exclusion}")
+                        continue
+                    if not watchlist_company_matches(
+                        searchable_text, aliases,
+                        context_keywords=context_keywords,
+                        exact_name_match=company.get("exact_name_match", False),
+                    ):
                         logging.info(
-                            f"      [Watchlist] REJECT [{company_name}]: company name not found"
+                            f"      [Watchlist] REJECT [{company_name}]: company identity not confirmed"
                         )
                         continue
 
@@ -5578,7 +5684,8 @@ def main():
         pef_context["firm_name"],
         initial_seen_links=initial_pef_seen_links,
         news_history=news_history,
-        collected_date=today
+        collected_date=today,
+        watchlist=pef_watchlist,
     )
 
     # 7. Fetch configured company watchlist news before generic PEF news.
@@ -5617,7 +5724,8 @@ def main():
             | watchlist_link_urls
         ),
         news_history=news_history,
-        collected_date=today
+        collected_date=today,
+        watchlist=pef_watchlist,
     )
     combined_pef_context = (
         news_context_firm_mentions

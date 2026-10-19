@@ -774,8 +774,18 @@ class PefWatchlistTests(unittest.TestCase):
                         {
                             "name": "페퍼저축은행",
                             "aliases": ["페퍼 저축은행", "Pepper Savings Bank"],
+                            "exclude_keywords": [" 배구 ", "배구", "AI페퍼스", "", None],
+                        },
+                        {
+                            "name": "동보",
+                            "aliases": [" 동보 "],
+                            "context_keywords": [" 자동차 ", "자동차", "변속기", "", None],
+                            "exact_name_match": True,
                         },
                         {"name": 1234, "aliases": ["invalid"]},
+                        {"name": "잘못된조건1", "context_keywords": "자동차"},
+                        {"name": "잘못된조건2", "context_keywords": ["", None]},
+                        {"name": "잘못된제외조건", "exclude_keywords": "배구"},
                     ],
                     ensure_ascii=False,
                 ),
@@ -795,9 +805,150 @@ class PefWatchlistTests(unittest.TestCase):
                         "페퍼 저축은행",
                         "Pepper Savings Bank",
                     ],
+                    "exclude_keywords": ["배구", "AI페퍼스"],
+                },
+                {
+                    "name": "동보",
+                    "aliases": ["동보"],
+                    "context_keywords": ["자동차", "변속기"],
+                    "exact_name_match": True,
                 },
             ],
         )
+
+    def test_ambiguous_company_requires_own_name_and_nearby_industry_context(self):
+        watchlist = main.load_pef_watchlist(str(Path(__file__).with_name("pef_watchlist.json")))
+        dongbo = next(company for company in watchlist if company["name"] == "동보")
+        for text, expected in (
+            ("동보, 자동차 부품 사업 확대", True),
+            ("㈜동보는 엔진 부품 공급을 확대한다.", True),
+            ("동보의 변속기 부품 수주가 증가했다.", True),
+            ("동보가 전기차용 감속기 생산에 투자한다.", True),
+            ("동보, 로봇 부품 사업 확대", True),
+            ("동 보, 자동차 부품 신규 수주", True),
+            ("동보건설, 자동차 공장 건축 수주", False),
+            ("동보산업의 자동차 부품 사업", False),
+            ("한국동보, 엔진 개발 투자", False),
+            ("동보, 신규 사옥 착공", False),
+            ("자동차 부품 업계 투자 확대", False),
+            ("동보, 신규 사옥 착공. " + "다른 기업에 관한 내용이다. " * 30 + "자동차 부품 투자", False),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(main.watchlist_company_matches(
+                    main.normalize_text(text), dongbo["aliases"],
+                    context_keywords=dongbo["context_keywords"],
+                    exact_name_match=dongbo["exact_name_match"],
+                ), expected)
+
+    def test_pepper_volleyball_exclusions_are_company_specific(self):
+        watchlist = main.load_pef_watchlist(str(Path(__file__).with_name("pef_watchlist.json")))
+        for title, content, excluded in (
+            ("페퍼저축은행 여자배구단 새 시즌", "", True),
+            ("페퍼저축은행, 새 시즌 준비", "여자 배구 선수 영입", True),
+            ("페퍼 세이빙스 뱅크 구단 소식", "AI 페퍼스 경기", True),
+            ("페퍼저축은행 선수단 소식", "V - 리그 경기 결과", True),
+            ("Pepper Savings Bank news", "VOLLEYBALL team", True),
+            ("페퍼저축은행 소식", "KOVO 소식", True),
+            ("페퍼저축은행, 건전성 개선", "연체율과 자본비율 관리 강화", False),
+            ("페퍼저축은행, 숲 관련 금융 거래", "SOOP 대출 조건 변경", False),
+            ("다른 회사 여자배구 후원", "배구단 운영 소식", False),
+        ):
+            with self.subTest(title=title, content=content):
+                self.assertEqual(
+                    bool(main.watchlist_exclusion_reason(title, content, watchlist)), excluded,
+                )
+
+    @patch.dict("os.environ", {"PEF_WATCHLIST_MAX_ARTICLES_PER_COMPANY": "1"})
+    @patch("main.build_news_queries", return_value=["사모펀드"])
+    @patch("main.build_firm_news_queries", return_value=["Baikal Investment"])
+    @patch("main.scrape_article_content")
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_pepper_sports_cannot_reenter_via_other_pef_sources(
+        self, mock_get, mock_parse_feed, mock_scrape, _firm_queries, _news_queries,
+    ):
+        pepper = next(company for company in main.load_pef_watchlist(
+            str(Path(__file__).with_name("pef_watchlist.json")),
+        ) if company["name"] == "페퍼저축은행")
+        cases = (
+            ("페퍼저축은행 여자배구단 매각 - 더벨", "title-sports"),
+            ("페퍼저축은행, 새 투자자와 인수 계약 - 더벨", "body-sports"),
+            ("페퍼저축은행, 사모펀드 경영권 매각 검토 - 더벨", "bank"),
+        )
+
+        def scrape(url, **_kwargs):
+            if url.endswith("body-sports"):
+                return "Baikal Investment 관련 기사이며 페퍼저축은행 AI 페퍼스 팀의 소식이다. " * 12
+            if url.endswith("title-sports"):
+                return "페퍼저축은행 여자배구단 경기와 선수단 소식을 설명하는 기사이다. " * 12
+            return "Baikal Investment 사모펀드의 페퍼저축은행 경영권 인수와 실사 조건을 검토한다. " * 12
+
+        mock_scrape.side_effect = scrape
+        for route in ("watchlist", "pef", "firm_mention", "general"):
+            with self.subTest(route=route):
+                mock_scrape.reset_mock()
+                mock_get.reset_mock()
+                mock_parse_feed.return_value = SimpleNamespace(entries=[
+                    SimpleNamespace(title=title, link=f"https://example.com/{slug}")
+                    for title, slug in cases
+                ])
+                kwargs = {"collected_date": date(2026, 10, 19)}
+                if route == "watchlist":
+                    result = main.fetch_watchlist_news([pepper], **kwargs)
+                elif route == "firm_mention":
+                    result = main.fetch_firm_mention_news(
+                        "Baikal Investment", watchlist=[pepper], **kwargs,
+                    )
+                else:
+                    result = main.fetch_news(target=route, watchlist=[pepper], **kwargs)
+                context, links, _seen, pending, _status = result
+                urls = [item["link"] if isinstance(item, dict) else item[1] for item in links]
+                if route == "general":
+                    self.assertIn("https://example.com/title-sports", urls)
+                    continue
+                self.assertEqual(urls, ["https://example.com/bank"])
+                self.assertEqual(len(pending), 1)
+                self.assertNotIn("AI 페퍼스", context)
+                self.assertNotIn("여자배구단", context)
+                self.assertEqual(mock_scrape.call_count, 2)
+                if route == "watchlist":
+                    query = mock_get.call_args.kwargs["params"]["q"]
+                    self.assertIn('-"배구"', query)
+                    self.assertIn('-"AI페퍼스"', query)
+                    self.assertNotIn('-"숲"', query)
+
+    @patch.dict("os.environ", {"PEF_WATCHLIST_MAX_ARTICLES_PER_COMPANY": "1"})
+    @patch("main.scrape_article_content")
+    @patch("main.parse_google_news_feed")
+    @patch("main.requests.get", return_value=Mock())
+    def test_ambiguous_company_filters_candidates_before_filling_article_limit(
+        self, mock_get, mock_parse_feed, mock_scrape,
+    ):
+        dongbo = next(company for company in main.load_pef_watchlist(
+            str(Path(__file__).with_name("pef_watchlist.json")),
+        ) if company["name"] == "동보")
+        entries = [SimpleNamespace(title=title, link=f"https://example.com/{slug}")
+                   for title, slug in (
+                       ("동보건설, 자동차 공장 수주 - 경제신문", "wrong-name"),
+                       ("동보, 신규 사옥 착공 - 경제신문", "no-context"),
+                       ("동보, 전기차 변속기 부품 수주 - 경제신문", "right-company"),
+                   )]
+        mock_parse_feed.return_value = SimpleNamespace(entries=entries)
+        mock_scrape.return_value = "거래 진행 상황과 향후 일정을 자세히 설명하는 기사 본문입니다. " * 12
+
+        context, links, _seen, pending, status = main.fetch_watchlist_news(
+            [dongbo], collected_date=date(2026, 10, 19),
+        )
+
+        self.assertEqual([item["link"] for item in links], ["https://example.com/right-company"])
+        self.assertEqual(len(pending), 1)
+        self.assertIn("Watchlist Company: 동보", context)
+        self.assertNotIn("동보건설", context)
+        self.assertEqual(status["queries_attempted"], 1)
+        query = mock_get.call_args.kwargs["params"]["q"]
+        self.assertTrue(query.startswith('"동보" ('))
+        self.assertIn('"자동차" OR "전기차"', query)
+        self.assertIn("when:3d", query)
 
     @patch.dict(
         "os.environ",

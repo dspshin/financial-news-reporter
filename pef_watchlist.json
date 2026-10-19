@@ -12,6 +12,14 @@
       "페퍼저축은행",
       "페퍼 세이빙스 뱅크",
       "Pepper Savings Bank"
+    ],
+    "exclude_keywords": [
+      "배구",
+      "AI페퍼스",
+      "V리그",
+      "V-리그",
+      "KOVO",
+      "volleyball"
     ]
   },
   {
@@ -19,6 +27,43 @@
     "aliases": [
       "세우글로벌",
       "SEWOO GLOBAL"
+    ]
+  },
+  {
+    "name": "메디플러스솔루션",
+    "aliases": [
+      "메디플러스솔루션",
+      "메디플러스 솔루션",
+      "Medi Plus Solution"
+    ]
+  },
+  {
+    "name": "서부청과",
+    "aliases": [
+      "서부청과"
+    ]
+  },
+  {
+    "name": "동보",
+    "aliases": [
+      "동보"
+    ],
+    "exact_name_match": true,
+    "context_keywords": [
+      "자동차",
+      "전기차",
+      "엔진",
+      "변속기",
+      "감속기",
+      "모터",
+      "로봇"
+    ]
+  },
+  {
+    "name": "윈저글로벌",
+    "aliases": [
+      "윈저글로벌",
+      "Windsor Global"
     ]
   }
 ]
