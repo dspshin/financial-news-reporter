@@ -2550,7 +2550,26 @@ def normalize_bond_issuer_key(issuer):
     normalized = normalize_whitespace(issuer)
     normalized = re.sub(r"\([^)]*\)", "", normalized)
     normalized = normalized.replace("주식회사", "").replace("㈜", "")
-    return re.sub(r"[^0-9A-Za-z가-힣]", "", normalized).lower()
+    key = re.sub(r"[^0-9A-Za-z가-힣]", "", normalized).lower()
+    # Exact legal-name aliases only: subsidiaries such as KCC건설 stay distinct.
+    return {"케이씨씨": "kcc"}.get(key, key)
+
+
+def bond_series_key(event):
+    return re.sub(r"\s+", "", str(event.get("series") or ""))
+
+
+def bond_same_issuance(left, right):
+    """Known dates/series must agree; missing metadata cannot pick among peers."""
+    if bond_event_identity_key(left) != bond_event_identity_key(right):
+        return False
+    if bond_series_key(left) and bond_series_key(right) and bond_series_key(left) != bond_series_key(right):
+        return False
+    return all(
+        not left.get(field) or not right.get(field)
+        or bond_history_date_value(left[field]) == bond_history_date_value(right[field])
+        for field in ("demand_date", "payment_date")
+    )
 
 
 def nh_bond_event_reliable(event):
@@ -2661,7 +2680,7 @@ def merge_bond_conditions(dart_event, nh_event):
 
 
 def merge_bond_demand_events(dart_items, nh_items, nh_issues=None):
-    merged = {}
+    groups, merged = {}, []
     rejected_issuers = {
         normalize_bond_issuer_key(issue.get("issuer", ""))
         for issue in nh_issues or []
@@ -2674,34 +2693,63 @@ def merge_bond_demand_events(dart_items, nh_items, nh_issues=None):
             rejected_issuers.add(issuer_key)
         if not issuer_key or not isinstance(demand_date, date):
             continue
-        key = (issuer_key, demand_date)
-        candidate = dict(event)
-        if key in merged:
-            candidate["condition_errors"] = ["ambiguous NH schedules for issuer/date"]
-        merged[key] = candidate
+        key = (bond_event_identity_key(event), demand_date)
+        groups.setdefault(key, {"nh": [], "dart": []})["nh"].append(dict(event))
 
     for event in dart_items or []:
         demand_date = event.get("demand_date")
         issuer_key = normalize_bond_issuer_key(event.get("issuer", ""))
         if not issuer_key or not isinstance(demand_date, date):
             continue
-        key = (issuer_key, demand_date)
-        nh_event = merged.get(key)
-        for other_key, other in merged.items():
-            if other_key == key or other_key[0] != issuer_key:
+        key = (bond_event_identity_key(event), demand_date)
+        groups.setdefault(key, {"nh": [], "dart": []})["dart"].append(dict(event))
+
+    def pending(event, reason):
+        event["condition_errors"] = list(event.get("condition_errors") or []) + [reason]
+
+    for group in groups.values():
+        nh, dart = group["nh"], group["dart"]
+        matches = [[i for i, other in enumerate(nh) if bond_same_issuance(event, other)] for event in dart]
+        used = set()
+        for event, indices in zip(dart, matches):
+            if len(indices) == 1 and sum(indices[0] in peers for peers in matches) == 1:
+                used.add(indices[0])
+                merged.append(merge_bond_conditions(event, nh[indices[0]]))
+            else:
+                if indices:
+                    pending(event, "ambiguous NH/DART issuance match")
+                    for i in indices:
+                        pending(nh[i], "ambiguous NH/DART issuance match")
+                elif len(nh) == len(dart) == 1:
+                    # A sole pair with contradictory metadata is unverified,
+                    # rather than silently merging two different issuances.
+                    pending(event, "NH/DART issuance metadata conflict")
+                    pending(nh[0], "NH/DART issuance metadata conflict")
+                merged.append(event)
+        merged.extend(event for i, event in enumerate(nh) if i not in used)
+
+    for i, event in enumerate(merged):
+        for other in merged[:i]:
+            if bond_event_identity_key(event) != bond_event_identity_key(other):
                 continue
-            if any(event.get(field) and event.get(field) == other.get(field) for field in ("payment_date", "series")):
-                other["condition_errors"] = list(other.get("condition_errors") or []) + ["conflicting demand dates for same issuance"]
-                event = {**event, "condition_errors": ["conflicting demand dates for same issuance"]}
-        authoritative = merge_bond_conditions(event, nh_event) if nh_event else dict(event)
-        if issuer_key in rejected_issuers:
-            authoritative["condition_errors"] = list(authoritative.get("condition_errors") or []) + ["NH issuer conditions rejected"]
-        authoritative["condition_errors"] = bond_event_validation_errors(authoritative)
-        merged[key] = authoritative
+            if bond_same_issuance(event, other):
+                pending(event, "ambiguous duplicate issuance")
+                pending(other, "ambiguous duplicate issuance")
+            elif event["demand_date"] != other["demand_date"] and (
+                event.get("payment_date") == other.get("payment_date")
+                or (bond_series_key(event) and bond_series_key(event) == bond_series_key(other))
+            ) and not (bond_series_key(event) and bond_series_key(other)
+                       and bond_series_key(event) != bond_series_key(other)):
+                pending(event, "conflicting demand dates for same issuance")
+                pending(other, "conflicting demand dates for same issuance")
+        if normalize_bond_issuer_key(event["issuer"]) in rejected_issuers:
+            pending(event, "NH issuer conditions rejected")
+    for event in merged:
+        event["condition_errors"] = bond_event_validation_errors(event)
 
     return sorted(
-        merged.values(),
-        key=lambda item: (item["demand_date"], item["issuer"]),
+        merged,
+        key=lambda item: (item["demand_date"], item["issuer"], bond_history_date_value(item.get("payment_date")) or "", bond_series_key(item)),
     )
 
 
@@ -2836,7 +2884,7 @@ def snapshot_bond_event(event):
         for manager in event.get("managers") or []
         if normalize_whitespace(manager)
     })
-    return {
+    snapshot = {
         "issuer": normalize_whitespace(event.get("issuer", "")),
         "rating": normalize_whitespace(event.get("rating", "")) or None,
         "term": compact_bond_term_text(event.get("term")),
@@ -2853,6 +2901,9 @@ def snapshot_bond_event(event):
         "end_time": event.get("end_time"),
         "rate_band": normalize_whitespace(event.get("rate_band", "")) or None,
     }
+    if bond_series_key(event):
+        snapshot["series"] = bond_series_key(event)
+    return snapshot
 
 
 def bond_event_fingerprint(snapshot):
@@ -2909,7 +2960,9 @@ def describe_bond_event_changes(previous, current):
     for field, label, formatter in field_specs:
         if previous.get(field) == current.get(field):
             continue
-        if field in {"security_type", "start_time", "end_time"} and (
+        if field == "rate_band" and bond_band_key(previous.get(field)) == bond_band_key(current.get(field)):
+            continue
+        if field in {"security_type", "managers", "start_time", "end_time"} and (
             not previous.get(field) or not current.get(field)
         ):
             # Temporary loss of optional DART enrichment is not a condition change.
@@ -2980,6 +3033,7 @@ def collect_bond_schedule_candidates(bond_market_data, reference_date):
             bond_event_identity_key(event),
             event.get("demand_date"),
             event.get("payment_date"),
+            bond_series_key(event),
         )
         if not key[0] or key in detail_keys:
             continue
@@ -3003,6 +3057,90 @@ def bond_schedule_snapshot_reliable(bond_market_data, reference_date):
             for event in collect_bond_schedule_candidates(bond_market_data, reference_date)[0]
         )
     )
+
+
+def bond_band_key(value):
+    return re.sub(r"\s+", "", str(value or "").replace("민평", "")).lower()
+
+
+def canonical_bond_history_key(key, event):
+    base = bond_event_identity_key(event)
+    suffix = key.split("|", 2)
+    return base + ("|" + suffix[2] if len(suffix) == 3 else "")
+
+
+def coalesce_bond_history_records(records):
+    """Combine compatible alias records in memory, never conflicting history."""
+    def known_tranches(event):
+        return {str(t.get("term", "")).removesuffix("년"): t["amount_eok"]
+                for t in event.get("tranches", []) if t.get("amount_eok") is not None}
+
+    for i, (_, left) in enumerate(records):
+        for _, right in records[:i]:
+            a, b = left["event"], right["event"]
+            for field in ("demand_date", "payment_date", "series", "amount_eok", "max_amount_eok",
+                          "term", "rating", "security_type", "start_time", "end_time", "rate_band"):
+                x, y = a.get(field), b.get(field)
+                if x in (None, "") or y in (None, ""):
+                    continue
+                if field == "term":
+                    x, y = compact_bond_term_text(x), compact_bond_term_text(y)
+                elif field == "rate_band":
+                    x, y = bond_band_key(x), bond_band_key(y)
+                if x != y:
+                    return None
+            x, y = known_tranches(a), known_tranches(b)
+            if any(x[term] != y[term] for term in x.keys() & y.keys()):
+                return None
+            # Disjoint allocations are not evidence that both represent one issue.
+            if x and y and x.keys() != y.keys():
+                return None
+    chosen = max(records, key=lambda item: (
+        bool(item[1]["event"].get("end_time")),
+        bool(item[1]["event"].get("security_type")),
+        len(known_tranches(item[1]["event"])),
+    ))[1]
+    record = dict(chosen)
+    snapshot = dict(chosen["event"])
+    for _, other in records:
+        for field, value in other["event"].items():
+            if not snapshot.get(field) or (field == "tranches" and len(known_tranches(other["event"])) > len(known_tranches(snapshot))):
+                snapshot[field] = value
+    record["event"] = snapshot
+    record["missing_count"] = min(int(r.get("missing_count", 0)) for _, r in records)
+    return record
+
+
+def match_bond_history(candidates, previous_events):
+    """Match aliases by issuance metadata; ambiguous matches leave history alone."""
+    matches = []
+    for event in candidates:
+        base = bond_event_identity_key(event)
+        peers = [(key, record) for key, record in previous_events.items()
+                 if bond_event_identity_key(record["event"]) == base]
+        exact = [(key, record) for key, record in peers if bond_same_issuance(event, record["event"])]
+        if not exact and sum(bond_event_identity_key(e) == base for e in candidates) == 1:
+            # Preserve genuine date corrections linked by the unchanged payment
+            # date or known series. A wholly different issuance is a new event.
+            exact = [(key, record) for key, record in peers
+                     if not (bond_series_key(event) and bond_series_key(record["event"])
+                             and bond_series_key(event) != bond_series_key(record["event"]))
+                     and (bond_history_date_value(event.get("payment_date"))
+                          == bond_history_date_value(record["event"].get("payment_date"))
+                          or (bond_series_key(event) and bond_series_key(event) == bond_series_key(record["event"])))]
+        matches.append(exact)
+    used = set()
+    resolved = []
+    for records in matches:
+        keys = {key for key, _ in records}
+        if used & keys:
+            return None
+        used.update(keys)
+        record = coalesce_bond_history_records(records) if records else None
+        if records and record is None:
+            return None
+        resolved.append((records, record))
+    return resolved
 
 
 def prepare_bond_schedule_digest(
@@ -3039,6 +3177,12 @@ def prepare_bond_schedule_digest(
 
     baseline = not bond_history.get("initialized", False)
     previous_events = bond_history.get("events", {})
+    matches = match_bond_history(candidates, previous_events)
+    if matches is None:
+        logging.warning("   [Bond History] Ambiguous alias/issuance history; comparison and update skipped.")
+        return {"reliable": False, "candidates": candidates, "next_history": None}
+    used_previous = {key for records, _ in matches for key, _ in records}
+    reserved_keys = {canonical_bond_history_key(key, record["event"]) for key, record in previous_events.items()}
     current_keys = set()
     next_events = {}
     digest = {
@@ -3053,22 +3197,24 @@ def prepare_bond_schedule_digest(
         "missing_alerts": [],
     }
 
-    for event in candidates:
+    for event, (matched_records, previous_record) in zip(candidates, matches):
         key = bond_event_identity_key(event)
         if not key:
             continue
-        if key in current_keys:
-            suffix = bond_history_date_value(
-                event.get("demand_date") or event.get("payment_date")
-            )
-            key = f"{key}|{suffix or len(current_keys)}"
-            logging.warning(
-                f"   [Bond History] Multiple active schedules share an identity: {key}"
-            )
+        if sum(bond_event_identity_key(e) == key for e in candidates) > 1 or (not matched_records and key in reserved_keys):
+            suffix = [bond_history_date_value(event.get("demand_date")),
+                      bond_history_date_value(event.get("payment_date")), bond_series_key(event)]
+            key += "|" + json.dumps(suffix, ensure_ascii=False, separators=(",", ":"))
+        elif len(matched_records) == 1:
+            key = canonical_bond_history_key(matched_records[0][0], event)
+        if any(old_key not in used_previous and canonical_bond_history_key(old_key, record["event"]) == key
+               for old_key, record in previous_events.items()):
+            suffix = [bond_history_date_value(event.get("demand_date")),
+                      bond_history_date_value(event.get("payment_date")), bond_series_key(event)]
+            key = bond_event_identity_key(event) + "|" + json.dumps(suffix, ensure_ascii=False, separators=(",", ":"))
         current_keys.add(key)
         snapshot = snapshot_bond_event(event)
         fingerprint = bond_event_fingerprint(snapshot)
-        previous_record = previous_events.get(key)
         next_events[key] = {
             "event": snapshot,
             "fingerprint": fingerprint,
@@ -3105,7 +3251,7 @@ def prepare_bond_schedule_digest(
         parse_int_env("BOND_HISTORY_MISSING_CONFIRMATIONS", 2),
     )
     for key, previous_record in previous_events.items():
-        if key in current_keys:
+        if key in current_keys or key in used_previous:
             continue
         previous_snapshot = previous_record.get("event", {})
         anchor_date = get_bond_event_anchor_date(previous_snapshot)

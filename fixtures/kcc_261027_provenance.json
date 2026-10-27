@@ -1,0 +1,10 @@
+{
+  "NH_source": "http://nhisib.kr/syndication/List/%ED%9A%8C%EC%82%AC%EC%B1%84%EB%B0%9C%ED%96%89%EC%98%88%EC%A0%95%EB%A6%AC%EC%8A%A4%ED%8A%B8_261027.pdf",
+  "NH_PDF_sha256": "45140d49f4711fd542d3ecf9b40c86c38f2e37b6fee307b67a5a51ba7e99b85d",
+  "NH_PDF_created_at": "2026-10-27T07:52:24+09:00",
+  "NH_excerpt_sha256": "a51dfcbe468b2f0f87a1aec5ad166d36074151643778de760bb20daead9e98e3",
+  "DART_source": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261023000404",
+  "DART_overview_sha256": "3ff1828f2f3710c73e3e742f5d3d1c6eee1dbfdbdfb1232ebbaea30ac643477f",
+  "DART_clause_sha256": "06187a767598c175d8f6c3d3f230ea991f8419fee1bf6c3827a72d86bc5eaa9b",
+  "scope": "Real public-source excerpts; DART aggregate objects use verified original values. Prior histories and alternate issuance/date/series scenarios in tests are synthetic. Morning server execution cache and history were not obtained."
+}
