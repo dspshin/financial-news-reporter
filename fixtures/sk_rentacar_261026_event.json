@@ -1,0 +1,16 @@
+{
+  "issuer": "에스케이렌터카",
+  "receipt_date": "2026-10-26",
+  "payment_date": "2026-11-05",
+  "security_type": "무보증사채",
+  "report_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261026000244",
+  "source": "dart",
+  "demand_date": "2026-10-28",
+  "start_time": "09:00",
+  "end_time": "16:00",
+  "amount_eok": 1000.0,
+  "max_amount_eok": null,
+  "rating": "A0",
+  "term": "2년/3년",
+  "rate_band": "개별민평 -30~+30bp"
+}

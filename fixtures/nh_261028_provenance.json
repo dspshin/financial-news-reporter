@@ -1,0 +1,28 @@
+{
+  "source": "Actual NH email PDF attachment (2026-10-28). Public URL redirected to an error page at retrieval. This is not the original GP server cache.",
+  "nh_message_id": "1a17f982333c2f87",
+  "gp_message_id": "1a17fcf2bbe7be58",
+  "url": "http://nhisib.kr/syndication/List/회사채발행예정리스트_261028.pdf",
+  "pdf_created_at": "2026-10-28 07:52:55+09:00",
+  "dart_url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261026000244",
+  "dart_section": {
+    "text": "1. 공모개요",
+    "id": "8",
+    "rcpNo": "20261026000244",
+    "dcmNo": "11627267",
+    "eleId": "8",
+    "offset": "75295",
+    "length": "18268",
+    "dtd": "dart4.xsd",
+    "tocNo": "8",
+    "atocId": "8"
+  },
+  "dart_original_html_sha256": "7b02ab9fa69a7a10a044e5df2b91a090c3b91f80d87c8c88ed6775486e6ed959",
+  "fixtures": {
+    "nh_261028.pdf": "595d783f510b3d30f1d7e721f2c2ade19d959c043ae7fb1db40f443d9733ae9f",
+    "nh_261028_layout.txt": "34f720c02fb7317c12e9e5eb5024f00c44174cce6102cfb593d59ddc69bdf689",
+    "sk_rentacar_261026_time_excerpt.txt": "553b218559ce5469f3f0e35cc8caedccebe497eab5c9030a08fd55ebcf3f6a3a",
+    "sk_rentacar_261026_event.json": "1b0fff1881fb220b582825f9a12353de22b031fe55b9926401781acc889ef7f5"
+  },
+  "test_scope": "Actual PDF bytes, layout and DART time excerpt. Transport mocks, prior histories, malformed ratings, alternate issues, shifted coordinates and conflicting conditions are synthetic. Live server checkout/history was not inspected. SK DART event JSON is derived by the unchanged DART parser from the actual overview and observed disclosure metadata."
+}

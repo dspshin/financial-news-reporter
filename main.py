@@ -2551,7 +2551,10 @@ def normalize_bond_issuer_key(issuer):
     normalized = re.sub(r"\([^)]*\)", "", normalized)
     normalized = normalized.replace("주식회사", "").replace("㈜", "")
     key = re.sub(r"[^0-9A-Za-z가-힣]", "", normalized).lower()
-    # Exact legal-name aliases only: subsidiaries such as KCC건설 stay distinct.
+    # Normalize the leading group name only; the entire remaining name must
+    # still agree. Do not guess transliterations of subsidiaries or acronyms.
+    if key.startswith("에스케이"):
+        key = "sk" + key[len("에스케이"):]
     return {"케이씨씨": "kcc"}.get(key, key)
 
 

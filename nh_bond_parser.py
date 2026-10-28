@@ -9,7 +9,8 @@ import re
 from datetime import date
 
 
-RATING = r"(?:AAA|AA[+\-0]?|A[+\-0]?|BBB[+\-0]?|BB[+\-0]?|B[+\-0]?)(?:\(P\))?"
+RATING_GRADE = r"(?:AAA|AA[+\-0]?|A[+\-0]?|BBB[+\-0]?|BB[+\-0]?|B[+\-0]?)(?:\([SP]\))?"
+RATING = rf"{RATING_GRADE}(?:\s*/\s*{RATING_GRADE})*"
 ISSUER_ROW = re.compile(rf"^\s*(?P<issuer>\S(?:.*?\S)?)\s{{2,}}(?P<rating>{RATING})(?=\s|$)")
 TERM = r"(?:\d+(?:\.\d+)?(?:NC\d+(?:\.\d+)?)?년?|영구)"
 TERMS = rf"{TERM}(?:\s*/\s*{TERM})*"
@@ -263,9 +264,13 @@ def extract_pdf_cell_overrides(page, layout):
             continue
         if not columns:
             continue
-        if ISSUER_ROW.match(line):
+        first = ISSUER_ROW.match(line)
+        if first:
             issuer_start = index
-        term = line[slice(*columns["term"])].strip()
+        start, end = columns["term"]
+        # Composite ratings can extend past the centered header boundary.
+        # Their suffix is not part of the adjacent tenor cell.
+        term = line[max(start, first.end() if first else start):end].strip()
         if issuer_start is not None and re.fullmatch(TERMS, term):
             raw_rows.append({"index": index, "line": line, "term": term, "issuer_start": issuer_start})
     if len(raw_rows) != len(physical) or not raw_rows:
@@ -351,6 +356,10 @@ def _set_total(row, value):
 def _parse_cells(row, line, columns, first, override=None):
     if columns:
         cells = dict(override) if override else {name: line[start:end].strip() for name, (start, end) in columns.items()}
+        issuer = ISSUER_ROW.match(line) if first else None
+        if issuer and not override:
+            start, end = columns["term"]
+            cells["term"] = line[max(start, issuer.end()):end].strip()
         if "issued_amount" in columns and not override:
             # A left-aligned manager can start before its centered header.
             start, end = columns["max"]
@@ -490,6 +499,12 @@ def parse_schedule(text, reference_date, pdf_url, diagnostics=None):
             # Collateral/guarantee descriptions occupy the issuer column while
             # the same physical row carries a continuation tenor and amount.
             pass
+        elif columns and line[:columns["term"][0]].strip():
+            # An unreadable issuer/rating still ends the previous issuer.
+            # Its metadata and subsequent tenors must never attach upstream.
+            diagnostics.append({"issuer": "unknown", "errors": ["unrecognized issuer row"]})
+            current = None
+            continue
         elif not columns and re.match(r"^\s*\([^)]*\)\s+\d", line):
             current["errors"].append("description continuation needs column header")
             continue
