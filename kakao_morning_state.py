@@ -30,6 +30,38 @@ def configured_rooms(config):
     return rooms
 
 
+def room_start_cutoffs(config):
+    """Map each configured start date or first edition to a sortable cutoff."""
+    starts = config.get("room_start_dates", {})
+    rooms = configured_rooms(config)
+    if not isinstance(starts, dict):
+        raise ValueError("room_start_dates must map room names to dates or editions")
+    cutoffs = {}
+    for room, value in starts.items():
+        if room not in rooms or not isinstance(value, str):
+            raise ValueError("Invalid room_start_dates entry")
+        try:
+            if value.endswith(("-am", "-pm")):
+                cutoffs[room] = bundle_edition(Path(value))
+                day, edition = cutoffs[room]
+                if value != f"{day.isoformat()}-{edition}":
+                    raise ValueError
+            else:
+                day = date.fromisoformat(value)
+                if value != day.isoformat():
+                    raise ValueError
+                cutoffs[room] = (day, "am")
+        except ValueError:
+            raise ValueError("Room start must be YYYY-MM-DD or YYYY-MM-DD-am/pm") from None
+    return cutoffs
+
+
+def active_delivery_rooms(config, rooms, day, edition):
+    cutoffs = room_start_cutoffs(config)
+    return [room for room in rooms
+            if (day, edition) >= cutoffs.get(room, (date.min, "am"))]
+
+
 def direct_plan(config, day):
     plan = config.get("direct_delivery")
     if plan is None:
@@ -63,8 +95,11 @@ def share_plan(config, day):
             or not isinstance(plan.get("effective_from"), str)):
         raise ValueError("Invalid KakaoTalk share delivery plan")
     effective = date.fromisoformat(plan["effective_from"])
+    # A newly authorized destination must not invalidate an older share plan.
+    # Before the share plan starts, validate against its own activation date.
+    eligible = set(active_delivery_rooms(config, rooms, max(day, effective), "am"))
     if (len(set(targets)) != len(targets)
-            or set(targets) != set(rooms) - {source}
+            or set(targets) != eligible - {source}
             or source in targets or effective.isoformat() != plan["effective_from"]):
         raise ValueError("Invalid KakaoTalk share delivery plan")
     return plan if day >= effective else None
@@ -177,21 +212,12 @@ def select_room(rooms, requested):
     return requested
 
 
-def require_room_active(config, room, now):
-    starts = config.get("room_start_dates", {})
-    if not isinstance(starts, dict):
-        raise ValueError("room_start_dates must map room names to YYYY-MM-DD")
-    for name, value in starts.items():
-        if name not in configured_rooms(config) or not isinstance(value, str):
-            raise ValueError("Invalid room_start_dates entry")
-        try:
-            start = date.fromisoformat(value)
-        except ValueError:
-            raise ValueError("Room start date must be YYYY-MM-DD") from None
-        if start.isoformat() != value:
-            raise ValueError("Room start date must be YYYY-MM-DD")
-        if name == room and now.astimezone(KST).date() < start:
-            raise ValueError(f"This room's delivery starts on {value} KST; do not send earlier")
+def require_room_active(config, room, now, edition="am", bundle_day=None):
+    today = now.astimezone(KST).date()
+    day = min(today, bundle_day) if bundle_day else today
+    if not active_delivery_rooms(config, [room], day, edition):
+        start = config["room_start_dates"][room]
+        raise ValueError(f"This room's delivery starts on {start} KST; do not send earlier")
 
 
 def require_previous_rooms(folder, state_root, previous_rooms, allow_deferred=False):
@@ -414,23 +440,23 @@ def main():
         print(json.dumps({"edition": folder.name, "rooms": records}, ensure_ascii=False))
         return
     room = select_room(rooms, args.room)
+    if args.action in {"begin", "retry", "defer", "checkpoint", "skip"}:
+        require_room_active(config, room, now, edition, day)
     if args.action == "status":
         path = receipt_path(state_root, folder, room)
         result = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {
             "status": "not_started", "room": room, "edition": folder.name,
         }
     elif args.action == "begin":
-        require_room_active(config, room, now)
         if plan and room != plan["source_room"]:
             raise ValueError("Forward from the source image with share-begin; no per-room upload")
         result = begin(folder, room, args.observed_room, state_root, now,
-                       previous_rooms=[r for r in rooms[:rooms.index(room)]
-                                       if day >= date.fromisoformat(config.get("room_start_dates", {}).get(r, "1970-01-01"))],
+                       previous_rooms=active_delivery_rooms(
+                           config, rooms[:rooms.index(room)], day, edition),
                        allow_deferred=bool(direct))
     elif args.action in {"retry", "defer"}:
         if not direct:
             raise ValueError("Recovery continuation only applies to the dated direct delivery plan")
-        require_room_active(config, room, now)
         from kakao_morning_recovery import record_retry, defer_room
         if args.action == "retry":
             result = record_retry(folder, state_root, room, args.operation, args.evidence, now)
@@ -438,12 +464,10 @@ def main():
             result = defer_room(folder, state_root, room, args.reason, args.evidence, now,
                                 args.operation)
     elif args.action == "checkpoint":
-        require_room_active(config, room, now)
         validate_bundle(folder, now)
         result = checkpoint(folder, room, args.observed_room, state_root,
                             args.phase, args.evidence, now)
     elif args.action == "skip":
-        require_room_active(config, room, now)
         result = skip(folder, room, state_root, args.reason, args.evidence, now)
     else:
         result = finish(folder, room, state_root, args.action, args.evidence, now)

@@ -203,6 +203,48 @@ class DirectRecoveryTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 kakao.direct_plan(self.config, date(2026, 10, 7))
 
+    def add_future_destination(self):
+        self.config["room_names"].append("new_open_group")
+        self.config["direct_delivery"]["room_names"].append("new_open_group")
+        self.config["room_start_dates"] = {"new_open_group": "2026-11-03"}
+        (self.root / ".kakao_morning.json").write_text(json.dumps(self.config))
+
+    def change_bundle_day(self, day):
+        self.folder = self.root / f"{day}-am"
+        self.folder.mkdir()
+        (self.folder / "briefing.png").write_bytes(b"reviewed image")
+        self.now = datetime.fromisoformat(f"{day}T08:30:00+09:00")
+        telegram = self.root / ".morning_image_delivery" / f"{self.folder.name}-channel.json"
+        telegram.write_text(json.dumps({"edition": self.folder.name, "status": "sent",
+                                        "image_sha256": delivery.sha256(self.folder / "briefing.png"),
+                                        "message_id": 308}))
+
+    def test_future_destination_preserves_historical_share_bundle(self):
+        self.add_future_destination()
+        self.change_bundle_day("2026-10-06")
+        self.assertEqual(kakao.delivery_rooms(self.config, self.now.date()),
+                         ["source", "first", "third", "fourth"])
+        receipts = [self.put(room, "sent") for room in ("source", "first", "third", "fourth")]
+        originals = {path: path.read_bytes() for path in receipts}
+        state = self.sync()
+        self.assertEqual(state["status"], "completed")
+        self.assertNotIn("new_open_group", state["deliveries"])
+        self.assertTrue(all(path.read_bytes() == original for path, original in originals.items()))
+
+    def test_new_destination_is_required_last_from_activation_date(self):
+        self.add_future_destination()
+        for room in ("source", "first", "third", "fourth"):
+            self.put(room, "sent")
+        self.assertEqual(self.sync()["status"], "completed")
+        self.change_bundle_day("2026-11-03")
+        for room in ("source", "first", "third", "fourth"):
+            self.assertEqual(self.sync()["next_target"], room)
+            self.put(room, "sent")
+        self.assertEqual(self.sync()["next_target"], "new_open_group")
+        self.assertEqual(self.sync()["status"], "incomplete")
+        self.put("new_open_group", "sent")
+        self.assertEqual(self.sync()["status"], "completed")
+
     def test_cli_retry_and_defer_update_planner_without_operating_ui(self):
         for _ in range(3):
             with patch("sys.argv", ["kakao", "retry", "--bundle", str(self.folder),

@@ -2,13 +2,25 @@
 
 ## 대상과 전송 설정 확인
 
-2026-10-07 이후 새 발행은 **Telegram → 금복회 장자풍도 60대下 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥** 순서로 동일 PNG를 각 방에 직접 첨부한다. 한 방을 sent·허용된 skipped 또는 근거 있는 deferred로 처리한 뒤 다음 방으로 진행한다. 실패한 방 때문에 나머지 방을 중단하지 않으며 **공유 기능·동시 선택·share-begin·share-checkpoint를 사용하지 않는다.** 제작·Telegram·완료 판정은 [발행 런북](MORNING_IMAGE_RUNBOOK.md), 폐기한 방식의 근거는 [과거 이력](MORNING_WORKFLOW_HISTORY.md)에 있다.
+2026-10-07부터 순차 직접 전송을 사용하며, **2026-11-06 마감판부터 Telegram → 금복회 장자풍도 60대下 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥ → 유명진 baikal inve → 젠포트 유저 커뮤니티 2** 순서로 동일 PNG를 각 방에 직접 첨부한다. 한 방을 sent·허용된 skipped 또는 근거 있는 deferred로 처리한 뒤 다음 방으로 진행한다. 실패한 방 때문에 나머지 방을 중단하지 않으며 **공유 기능·동시 선택·share-begin·share-checkpoint를 사용하지 않는다.** 제작·Telegram·완료 판정은 [발행 런북](MORNING_IMAGE_RUNBOOK.md), 폐기한 방식의 근거는 [과거 이력](MORNING_WORKFLOW_HISTORY.md)에 있다.
 
-`.kakao_morning.json`의 `direct_delivery`는 적용일 2026-10-07, 위 네 방 순서, `max_retries: 3`, `continue_on_room_failure: true`로 설정한다. 기존 `room_names`·`share_delivery`·`room_start_dates`는 과거 묶음 판정을 위해 보존한다. 적용일 이후에는 코드가 direct_delivery를 우선하므로 공유 설정을 삭제하거나 매일 다시 쓰지 않는다. 설정·영수증은 Git에서 제외하며 인증정보를 추가하지 않는다. 과거 묶음은 자동 재개·소급 전송하지 않는다.
+`.kakao_morning.json`의 `direct_delivery`는 적용일 2026-10-07, 위 여섯 방 순서, `max_retries: 3`, `continue_on_room_failure: true`로 설정한다. 기존 `room_names`·`share_delivery`·`room_start_dates`는 과거 묶음 판정을 위해 보존한다. 적용일 이후에는 코드가 direct_delivery를 우선하므로 공유 설정을 삭제하거나 매일 다시 쓰지 않는다. 설정·영수증은 Git에서 제외하며 인증정보를 추가하지 않는다. 과거 묶음은 자동 재개·소급 전송하지 않는다.
+
+### 2026-11-06 마감판부터 적용하는 1:1 대상
+
+- **‘유명진 baikal inve’**는 ‘사랑해요♡♥’ 다음, ‘젠포트 유저 커뮤니티 2’ 앞에 등록한다. 첫 적용은 11/6 마감판, 첫 아침판은 다음 개장일인 11/9다.
+- 최상위 `room_names`와 `direct_delivery.room_names`에 같은 위치로 추가하고, `room_start_dates["유명진 baikal inve"]`는 `2026-11-06-pm`으로 둔다. 일반 `YYYY-MM-DD` 값은 당일 아침판부터 적용하며, `-am/-pm`을 붙인 값은 해당 판부터 적용한다. 11/6 아침판까지는 기존 대상 순서를 사용한다.
+- 열린 창의 정확한 이름과 상대방 한 명과의 **1:1 개인 채팅**임을 확인한다. 동일 인물이 있는 단체방을 선택하지 않는다. 이름이나 유형을 확인할 수 없으면 `room_unavailable`로 보류하고 다음 방으로 진행한다.
+
+### 2026-11-03부터 적용하는 마지막 대상
+
+- 사용자의 2026-11-02 요청으로 **‘젠포트 유저 커뮤니티 2’ 오픈채팅 그룹**을 당시 순서의 마지막에 추가했다. 오전·마감 모두 동일한 검수 PNG를 직접 첨부하고 단계·발신 확인·최대 3회 복구 규칙을 적용한다.
+- `.kakao_morning.json`의 최상위 `room_names`와 `direct_delivery.room_names`에 정확한 이름을 마지막으로 추가하고, `room_start_dates["젠포트 유저 커뮤니티 2"]`를 `2026-11-03`으로 둔다. 기존 적용일·과거 공유 대상·영수증은 유지한다. 2026-11-02까지의 묶음은 기존 네 방만 대상으로 하며 소급 전송하지 않는다.
+- 검색 결과만으로 보내지 않는다. 열린 창의 정확한 이름 **‘젠포트 유저 커뮤니티 2’**와 오픈채팅 그룹 표시를 확인한다. 기존 **‘젠포트 유저 커뮤니티’** 또는 이름이 비슷한 방과 혼동하지 않는다. 정확한 방이나 유형을 확인할 수 없으면 `room_unavailable`로 보류하고 근거를 남긴다.
 
 ## 마감판에 적용할 때
 
-2026-10-13부터 마감판도 같은 네 방 순서·단계·인증·복구 규칙을 적용한다. [마감 제작 런북](CLOSING_IMAGE_RUNBOOK.md)으로 검수와 `publish_closing_image.py` 게시를 마친 뒤, 아래 예시의 **모든 `--bundle`과 이미지 파일 경로를 `output/YYYY-MM-DD-pm`으로 바꾼다.** 오전 이미지는 사용하지 않는다.
+2026-10-13부터 마감판도 같은 당일 활성 방 순서·단계·인증·복구 규칙을 적용한다. [마감 제작 런북](CLOSING_IMAGE_RUNBOOK.md)으로 검수와 `publish_closing_image.py` 게시를 마친 뒤, 아래 예시의 **모든 `--bundle`과 이미지 파일 경로를 `output/YYYY-MM-DD-pm`으로 바꾼다.** 오전 이미지는 사용하지 않는다.
 
 공통 `kakao_morning_state.py`·`morning_delivery_status.py`는 bundle의 `-am/-pm`에 맞는 QA와 Telegram 영수증을 선택한다. 오전 기록은 `.morning_kakao_delivery/`, 마감 기록은 `.closing_kakao_delivery/`로 분리한다. `.kakao_morning.json`의 현재 직접 전송 순서만 공유하고 기존 아침 영수증·재시도 횟수는 변경하지 않는다. 마감 완료 검사도 `python3 morning_delivery_status.py check --bundle output/YYYY-MM-DD-pm`을 사용한다. 이전 날짜의 마감판은 소급 전송하지 않는다.
 

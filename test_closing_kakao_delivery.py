@@ -100,6 +100,62 @@ class ClosingKakaoTests(unittest.TestCase):
         self.assertEqual(list(am.iterdir()), [morning_record])
         self.assertEqual(len(list(self.state_root.glob("*.json"))), 4)
 
+    def test_future_open_group_does_not_reopen_completed_pm_delivery(self):
+        config_path = self.root / ".kakao_morning.json"
+        config = json.loads(config_path.read_text())
+        config["room_names"].append("new_open_group")
+        config["direct_delivery"]["room_names"].append("new_open_group")
+        config["room_start_dates"] = {"new_open_group": "2026-11-03"}
+        config_path.write_text(json.dumps(config))
+        for room in self.rooms:
+            self.start(room)
+            self.advance(room)
+            self.invoke("sent", room, "--evidence", "Matching outgoing PM image")
+        state = self.check()
+        self.assertEqual(state["status"], "completed")
+        self.assertNotIn("new_open_group", state["deliveries"])
+        self.assertFalse(kakao.receipt_path(self.state_root, self.folder, "new_open_group").exists())
+
+    def test_first_pm_edition_inserts_room_without_reopening_same_day_am(self):
+        added_room = "new_personal_chat"
+        config_path = self.root / ".kakao_morning.json"
+        config = json.loads(config_path.read_text())
+        for rooms in (config["room_names"], config["direct_delivery"]["room_names"]):
+            rooms.insert(-1, added_room)
+        config["room_start_dates"] = {added_room: self.folder.name}
+        config_path.write_text(json.dumps(config))
+
+        am_folder = self.folder.with_name("2026-10-13-am")
+        am_folder.mkdir()
+        (am_folder / "briefing.png").write_bytes((self.folder / "briefing.png").read_bytes())
+        am_telegram = self.root / ".morning_image_delivery" / f"{am_folder.name}-channel.json"
+        am_telegram.parent.mkdir()
+        am_telegram.write_text(json.dumps(self.telegram_record | {"edition": am_folder.name}))
+        am_state_root = self.root / ".morning_kakao_delivery"
+        am_state_root.mkdir()
+        for room in self.rooms:
+            receipt = kakao.receipt_path(am_state_root, am_folder, room)
+            receipt.write_text(json.dumps({
+                "edition": am_folder.name, "room": room, "status": "sent",
+                "image_sha256": self.telegram_record["image_sha256"],
+                "observed_at_kst": self.now.isoformat(), "evidence": "Observed AM send",
+            }))
+        morning = delivery.reconcile(am_folder, self.root, self.now)
+        self.assertEqual(morning["status"], "completed")
+        self.assertEqual(list(morning["deliveries"]), ["telegram", *self.rooms])
+
+        for room in self.rooms[:-1]:
+            self.start(room)
+            self.advance(room)
+            self.invoke("sent", room, "--evidence", "Observed PM send")
+        self.assertEqual(self.check()["next_target"], added_room)
+        with self.assertRaises(ValueError):
+            self.start(self.rooms[-1])
+        self.start(added_room)
+        self.advance(added_room)
+        self.invoke("sent", added_room, "--evidence", "Observed PM send to personal chat")
+        self.assertEqual(self.check()["next_target"], self.rooms[-1])
+
     def test_am_telegram_success_cannot_authorize_pm_kakao(self):
         self.telegram.unlink()
         am = self.root / ".morning_image_delivery"

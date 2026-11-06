@@ -2,7 +2,7 @@
 
 import argparse
 import json
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from publish_morning_image import ROOT, KST, save_receipt, sha256
@@ -56,7 +56,7 @@ def read_record(path, folder, image_hash, room=None):
 def reconcile(folder, root=ROOT, now=None):
     # Import lazily: the publisher and Kakao CLI also call this module.
     from kakao_morning_state import (delivery_rooms, receipt_path, share_plan, direct_plan,
-                                    read_share_batch, share_receipt_path)
+                                    read_share_batch, share_receipt_path, active_delivery_rooms)
     now = now or datetime.now(KST)
     day, edition = bundle_edition(folder)
     config = json.loads((root / ".kakao_morning.json").read_text(encoding="utf-8"))
@@ -66,10 +66,7 @@ def reconcile(folder, root=ROOT, now=None):
     if edition == "pm" and not direct:
         raise ValueError("Closing KakaoTalk requires the sequential direct delivery plan")
     state_root = root / kakao_state_name(folder)
-    starts = config.get("room_start_dates", {})
-    if not isinstance(starts, dict) or any(room not in rooms for room in starts):
-        raise ValueError("Invalid room start dates")
-    active = [room for room in rooms if day >= date.fromisoformat(starts.get(room, "1970-01-01"))]
+    active = active_delivery_rooms(config, rooms, day, edition)
     image_hash = sha256(folder / "briefing.png")
     paths = list((root / telegram_state_name(folder)).glob(f"{folder.name}-*.json"))
     # Multiple destinations/conflicting records require inspection; do not pick a success.
