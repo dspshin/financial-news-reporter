@@ -162,6 +162,7 @@ ARTICLE_CONTENT_MAX_CHARS=2000
 | 평일 07:35 | Codex가 당일 텍스트·웹 원문을 확인하고 기준시각까지 공개된 정보로 제작 |
 | 이미지 검수 후 | `publish_morning_image.py`가 Telegram 게시·성공 확인 |
 | Telegram 성공 후 | 로그인된 카카오톡에서 금복회 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥ → 유명진 baikal inve → 젠포트 유저 커뮤니티 2 순차 직접 전송(유명진 방은 2026-11-06 마감판부터) |
+| 카카오톡 전체 방 처리 후 | 2026-11-09 아침판부터 WordPress에 같은 이미지·원고 전문·출처·관측시각·분석 근거 공개 게시 |
 
 한국 공휴일·대체/임시공휴일·주말·KRX 주식시장 휴장(노동절·연말 포함)은 제작·전송 없이 조용히 종료합니다. 개장 미확인은 보류합니다. 한국만 개장하면 미국 마지막 거래일 자료로 발행합니다. 기존 `main.py`·07:30 텍스트·PEF·이메일 작업과 분리해 운영합니다.
 
@@ -191,7 +192,15 @@ python3 morning_delivery_status.py sync --bundle output/YYYY-MM-DD-am
 python3 morning_delivery_status.py check --bundle output/YYYY-MM-DD-am
 ```
 
-최종 검사는 모든 대상 처리·검수 통과 시 0, 미완료 시 2입니다. 0에도 허용된 생략이 포함되므로 모든 대상 sent일 때만 전체 전송 완료로 보고합니다. 사용량은 시작·종료 각 한 번 조회하고, 이 대화에만 계정 전체 **남은 한도**의 시작·종료값과 사용량(%p)을 알립니다. 예: `주간 74% → 72% (2%p 사용)`. 원본 사용률을 기록하고 남은 한도는 `100 − 사용률`로 표시하며, 동일 한도·기간에서만 차이를 계산합니다.
+최종 검사는 모든 대상 처리·검수 통과 시 0, 미완료 시 2입니다. 0에도 허용된 생략이 포함되므로 모든 채널 sent이고 적용일 이후 WordPress published일 때 전체 전송·공개 게시 완료로 보고합니다. 사용량은 시작·종료 각 한 번 조회하고, 이 대화에만 계정 전체 **남은 한도**의 시작·종료값과 사용량(%p)을 알립니다. 예: `주간 74% → 72% (2%p 사용)`. 원본 사용률을 기록하고 남은 한도는 `100 − 사용률`로 표시하며, 동일 한도·기간에서만 차이를 계산합니다.
+
+#### WordPress 공개 게시
+
+카테고리는 아침판 **아침 시황**, 마감판 **마감 시황**으로 자동 지정합니다. `WORDPRESS_DELIVERY.json.category_ids`에 실제 카테고리 ID를 보관하고 게시 응답의 분류까지 대조합니다. 카테고리 미설정·불일치는 게시 완료로 처리하지 않습니다.
+
+공개 블로그는 [financial_news](https://financialnews7.wordpress.com)이며 2026-11-09 아침판부터 아침·마감 공통으로 적용합니다. 순서는 **Telegram → 카카오톡 모든 활성 방 처리 → WordPress**입니다. 연결된 WordPress 플러그인이 실제 업로드·글 생성을 수행하고 `wordpress_briefing.py`는 검수 자료의 블록 변환·원본 이미지 픽셀 대조·요청 전 영수증·글 읽기 대조·공개 페이지 확인을 담당합니다. 대상과 적용일은 `WORDPRESS_DELIVERY.json`, 절차는 [WORDPRESS_IMAGE_RUNBOOK.md](WORDPRESS_IMAGE_RUNBOOK.md)에 있습니다.
+
+`blog-analysis.md`와 해시를 포함한 `blog-qa.json`을 검수한 뒤 `prepare → begin-media → media → begin-post → published`로 진행합니다. 영수증은 `.wordpress_image_delivery/`에서 발행판별로 보존하며 게시 ID·URL·이미지 ID·해시를 기록합니다. `morning_delivery_status.py check`는 적용일 이후 WordPress까지 검사합니다. 불명확한 업로드·글 생성은 반복하지 않고 기존 결과를 조회합니다. 구독자 이메일·소셜 자동 공유는 끕니다. 과거 완료 기록은 적용일 때문에 다시 열리지 않습니다.
 
 #### 카카오톡 전송
 

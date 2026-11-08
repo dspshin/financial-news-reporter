@@ -2,6 +2,8 @@
 
 ## 대상과 전송 설정 확인
 
+2026-11-09 아침판부터 모든 활성 방을 sent·허용된 skipped·근거 있는 deferred로 처리한 뒤 [WordPress 공통 런북](WORDPRESS_IMAGE_RUNBOOK.md)에 따라 공개 게시한다. 마지막 카카오톡 방의 처리는 WordPress 단계의 진입 조건이며 최종 완료는 공개 게시까지 검사한다. 보류 방의 기록을 보존한 채 나머지 방과 WordPress를 진행한다.
+
 2026-10-07부터 순차 직접 전송을 사용하며, **2026-11-06 마감판부터 Telegram → 금복회 장자풍도 60대下 → x삼성 투자방 → 송골매 허리 → 사랑해요♡♥ → 유명진 baikal inve → 젠포트 유저 커뮤니티 2** 순서로 동일 PNG를 각 방에 직접 첨부한다. 한 방을 sent·허용된 skipped 또는 근거 있는 deferred로 처리한 뒤 다음 방으로 진행한다. 실패한 방 때문에 나머지 방을 중단하지 않으며 **공유 기능·동시 선택·share-begin·share-checkpoint를 사용하지 않는다.** 제작·Telegram·완료 판정은 [발행 런북](MORNING_IMAGE_RUNBOOK.md), 폐기한 방식의 근거는 [과거 이력](MORNING_WORKFLOW_HISTORY.md)에 있다.
 
 `.kakao_morning.json`의 `direct_delivery`는 적용일 2026-10-07, 위 여섯 방 순서, `max_retries: 3`, `continue_on_room_failure: true`로 설정한다. 기존 `room_names`·`share_delivery`·`room_start_dates`는 과거 묶음 판정을 위해 보존한다. 적용일 이후에는 코드가 direct_delivery를 우선하므로 공유 설정을 삭제하거나 매일 다시 쓰지 않는다. 설정·영수증은 Git에서 제외하며 인증정보를 추가하지 않는다. 과거 묶음은 자동 재개·소급 전송하지 않는다.

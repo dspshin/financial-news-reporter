@@ -53,7 +53,7 @@ def read_record(path, folder, image_hash, room=None):
         return {"status": "invalid", "receipt": path.name}
 
 
-def reconcile(folder, root=ROOT, now=None):
+def reconcile(folder, root=ROOT, now=None, include_wordpress=True, persist=True):
     # Import lazily: the publisher and Kakao CLI also call this module.
     from kakao_morning_state import (delivery_rooms, receipt_path, share_plan, direct_plan,
                                     read_share_batch, share_receipt_path, active_delivery_rooms)
@@ -174,7 +174,30 @@ def reconcile(folder, root=ROOT, now=None):
             and not recovery_invalid and order_valid and all(
                 deliveries[room]["status"] in {"sent", "skipped"} or room in deferred_rooms
                 for room in active))
-    save_receipt(folder / "run-status.json", result)
+    if include_wordpress:
+        from wordpress_briefing import configuration, delivery_status
+        if configuration(folder, root) is not None:
+            wordpress = delivery_status(folder, root)
+            channels_handled = result.get("all_targets_handled", complete)
+            result["channel_targets_handled"] = channels_handled
+            result["deliveries"]["wordpress"] = wordpress
+            published = wordpress["status"] == "published"
+            result["objective"] += "와 WordPress 공개 게시"
+            if not published:
+                result.update(status="incomplete", stage="wordpress_incomplete" if channels_handled
+                              else "delivery_incomplete")
+            result["all_targets_handled"] = channels_handled and wordpress["status"] in {"published", "deferred"}
+            if published and not channels_handled:
+                result.update(status="incomplete", next_action="inspect_wordpress_receipt_order",
+                              order_valid=False)
+            elif channels_handled and not published:
+                actions = {"not_started": "prepare_wordpress", "prepared": "upload_wordpress_media",
+                           "media_requested": "inspect_wordpress_media_no_reupload",
+                           "media_uploaded": "publish_wordpress", "post_requested": "inspect_wordpress_post_no_repost",
+                           "deferred": "report_wordpress_deferred", "invalid": "inspect_wordpress_receipt_no_repost"}
+                result.update(next_target="wordpress", next_action=actions[wordpress["status"]])
+    if persist:
+        save_receipt(folder / "run-status.json", result)
     return result
 
 
