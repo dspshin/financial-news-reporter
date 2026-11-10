@@ -41,8 +41,9 @@ class MorningPublisherTests(unittest.TestCase):
     def test_reject_stale_edition_and_early_run(self):
         with self.assertRaisesRegex(ValueError, "today"):
             publisher.validate_bundle(self.folder, self.now.replace(day=16))
-        with self.assertRaisesRegex(ValueError, "07:35"):
-            publisher.validate_bundle(self.folder, self.now.replace(hour=7, minute=34, second=59))
+        for minute, second in ((0, 0), (30, 0), (34, 59)):
+            with self.subTest(minute=minute, second=second), self.assertRaisesRegex(ValueError, "07:35"):
+                publisher.validate_bundle(self.folder, self.now.replace(hour=7, minute=minute, second=second))
 
     def test_missing_market_day_check_blocks_publishing(self):
         del self.qa["market_day"]

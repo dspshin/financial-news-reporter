@@ -19,6 +19,7 @@ import requests
 from dotenv import dotenv_values
 
 from morning_market_day import closure_reason
+from morning_schedule import INFORMATION_CUTOFF
 
 
 ROOT = Path(__file__).resolve().parent
@@ -227,7 +228,7 @@ class KisMarketClient:
 
 
 def timing_check(edition_date, queried_at):
-    target = datetime.combine(date.fromisoformat(edition_date), time(7, 35), KST)
+    target = datetime.combine(date.fromisoformat(edition_date), INFORMATION_CUTOFF, KST)
     actual = datetime.fromisoformat(queried_at).astimezone(KST)
     seconds = (actual - target).total_seconds()
     return {"target_at_kst": target.isoformat(), "actual_query_at_kst": actual.isoformat(),
@@ -248,7 +249,7 @@ def daily_row(body, day):
 def verify_quotes(contract, edition_date, quote, night_daily, regular_daily, night_minute, regular_minute):
     expected_day = previous_regular_day(edition_date)
     raw_date = expected_day.strftime("%Y%m%d")
-    cutoff = datetime.combine(edition_date, time(7, 35), KST)
+    cutoff = datetime.combine(edition_date, INFORMATION_CUTOFF, KST)
     night = daily_row(night_daily, expected_day)
     regular = daily_row(regular_daily, expected_day)
     try:
@@ -305,14 +306,14 @@ def verify_quotes(contract, edition_date, quote, night_daily, regular_daily, nig
 def collect(edition_date, *, client_factory=KisMarketClient, now=now_kst, **client_options):
     started = now().astimezone(KST)
     report = {"schema_version": 1, "source": "한국투자증권 OpenAPI", "date": edition_date.isoformat(),
-              "cutoff_at_kst": datetime.combine(edition_date, time(7, 35), KST).isoformat(),
+              "cutoff_at_kst": datetime.combine(edition_date, INFORMATION_CUTOFF, KST).isoformat(),
               "started_at_kst": started.isoformat(), "status": "unavailable", "requests": [],
-              "scheduled_time_check": {"target_at_kst": datetime.combine(edition_date, time(7, 35), KST).isoformat(),
+              "scheduled_time_check": {"target_at_kst": datetime.combine(edition_date, INFORMATION_CUTOFF, KST).isoformat(),
                                        "actual_query_at_kst": None, "queried_in_0735_minute": False,
                                        "availability": "not_verified"}}
     client = None
     try:
-        if started.date() != edition_date or started < datetime.combine(edition_date, time(7, 35), KST):
+        if started.date() != edition_date or started < datetime.combine(edition_date, INFORMATION_CUTOFF, KST):
             raise QuoteError("not_current_edition_or_before_0735")
         if closure_reason(edition_date):
             raise QuoteError("korean_market_closed")

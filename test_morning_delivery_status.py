@@ -113,6 +113,42 @@ class DeliveryCompletionTests(unittest.TestCase):
                 delivery.main()
         self.assertEqual(error.exception.code, 2)
 
+    def test_retired_wordpress_records_do_not_gate_either_edition_or_get_modified(self):
+        from image_delivery_edition import kakao_state_name, telegram_state_name
+        config = {"room_names": ["first", "second"], "direct_delivery": {
+            "effective_from": "2026-09-17", "room_names": ["first", "second"],
+            "max_retries": 3, "continue_on_room_failure": True}}
+        (self.root / ".kakao_morning.json").write_text(json.dumps(config))
+        old_config = self.root / "WORDPRESS_DELIVERY.json"
+        old_config.write_text('{"site_id":"123","effective_from":"2026-09-17-am"}')
+        old_store = self.root / ".wordpress_image_delivery"
+        old_store.mkdir()
+        for edition in ("am", "pm"):
+            with self.subTest(edition=edition):
+                folder = self.root / ("2026-09-17-" + edition)
+                folder.mkdir(exist_ok=True)
+                (folder / "briefing.png").write_bytes(b"reviewed image")
+                image_hash = delivery.sha256(folder / "briefing.png")
+                old_receipt = old_store / (folder.name + ".json")
+                old_receipt.write_text('{"status":"deferred","evidence":"site suspended"}')
+                before = old_receipt.read_bytes(), old_config.read_bytes()
+                telegram = self.root / telegram_state_name(folder)
+                telegram.mkdir(exist_ok=True)
+                record = {"edition": folder.name, "image_sha256": image_hash,
+                          "status": "sent", "message_id": 307,
+                          "evidence": "Observed outgoing image", "observed_at_kst": self.now.isoformat()}
+                (telegram / (folder.name + "-channel.json")).write_text(json.dumps(record))
+                store = self.root / kakao_state_name(folder)
+                store.mkdir(exist_ok=True)
+                for room in ("first", "second"):
+                    receipt_path(store, folder, room).write_text(json.dumps(record | {"room": room}))
+                state = delivery.reconcile(folder, self.root, self.now, persist=False)
+                self.assertEqual(state["status"], "completed")
+                self.assertEqual(state["next_action"], "complete")
+                self.assertTrue(state["all_targets_handled"])
+                self.assertNotIn("wordpress", state["deliveries"])
+                self.assertEqual(before, (old_receipt.read_bytes(), old_config.read_bytes()))
+
     def shared_plan(self):
         (self.root / ".kakao_morning.json").write_text(json.dumps({
             "room_names": ["first", "second", "third"],

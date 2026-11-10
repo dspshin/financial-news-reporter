@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from morning_market_day import validate_market_day
+from closing_schedule import closing_window
 from publish_morning_image import (
     KST, ROOT, check_channel, credentials, publish, sha256,
 )
@@ -30,14 +31,15 @@ def reviewed_time(value, label, day, now):
 def validate_bundle(folder, now):
     now = now.astimezone(KST)
     day = now.date()
-    if now.weekday() >= 5 or (now.hour, now.minute) < (16, 20):
+    window = closing_window(now)
+    if now.weekday() >= 5 or window["phase"] != "ready_to_finalize":
         raise ValueError("Closing publishing is restricted to weekdays after 16:20 KST")
     if folder.name != f"{day.isoformat()}-pm":
         raise ValueError("Bundle must belong to today's KST closing edition")
     qa = json.loads((folder / "qa.json").read_text(encoding="utf-8"))
     if qa.get("status") != "passed" or qa.get("date") != day.isoformat():
         raise ValueError("Today's closing visual/data review must be marked passed")
-    cutoff = f"{day.isoformat()}T16:20:00+09:00"
+    cutoff = window["cutoff"]
     if qa.get("cutoff") != cutoff:
         raise ValueError("Closing review cutoff must be today's 16:20 Asia/Seoul")
     market = qa.get("market_day")

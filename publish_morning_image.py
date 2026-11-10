@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import requests
 from dotenv import dotenv_values
 from morning_market_day import validate_market_day
+from morning_schedule import morning_window
 
 ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
@@ -65,15 +66,17 @@ def check_channel(token, channel):
 
 
 def validate_bundle(folder, now):
+    now = now.astimezone(KST)
     day = now.date().isoformat()
-    if now.weekday() >= 5 or (now.hour, now.minute) < (7, 35):
+    window = morning_window(now)
+    if now.weekday() >= 5 or window["phase"] != "ready_to_finalize":
         raise ValueError("Publishing is restricted to weekdays at or after 07:35 KST")
     if folder.name != f"{day}-am":
         raise ValueError("Bundle must belong to today's KST morning edition")
     qa = json.loads((folder / "qa.json").read_text(encoding="utf-8"))
     if qa.get("status") != "passed" or qa.get("date") != day:
         raise ValueError("Today's visual/data review must be marked passed")
-    if qa.get("cutoff") != f"{day}T07:35:00+09:00":
+    if qa.get("cutoff") != window["cutoff"]:
         raise ValueError("Review cutoff must be today's 07:35 Asia/Seoul")
     validate_market_day(qa.get("market_day"), now)
     for filename in ("briefing.png", "manuscript.txt", "sources.md", "caption.txt"):

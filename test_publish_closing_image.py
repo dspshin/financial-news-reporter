@@ -51,7 +51,8 @@ class ClosingPublisherTests(unittest.TestCase):
 
     def test_close_time_cutoff_and_edition_guards(self):
         self.assertIn("16:20", publisher.validate_bundle(self.folder, self.now))
-        for now in (self.now.replace(day=13), self.now.replace(hour=16, minute=19)):
+        for now in (self.now.replace(day=13), self.now.replace(hour=16, minute=0),
+                    self.now.replace(hour=16, minute=19, second=59)):
             with self.assertRaises(ValueError):
                 publisher.validate_bundle(self.folder, now)
         with self.assertRaises(ValueError):
